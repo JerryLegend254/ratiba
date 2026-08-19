@@ -1,0 +1,26 @@
+# Secrets. Only .env.example is ever committed.
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+secrets/
+
+# Build output
+bin/
+dist/
+/ratiba-api
+/ratiba-migrate
+
+# Editor, tooling and OS noise
+.idea/
+.vscode/
+.claude/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Go workspace files, which are personal to a developer
+go.work
+go.work.sum
