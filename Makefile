@@ -1,8 +1,4 @@
 # Ratiba task runner.
-#
-# There is no application yet — these targets exist to get a local PostgreSQL
-# running and the schema applied, so the constraints can be exercised directly
-# with SQL before any Go is written.
 
 .DEFAULT_GOAL := help
 SHELL := bash
@@ -60,3 +56,30 @@ migrate-up: ## Apply migrations with psql
 .PHONY: psql
 psql: ## Open a psql shell against the local database
 	psql "$(DATABASE_URL)"
+
+# ---------------------------------------------------------------------------
+# Go
+# ---------------------------------------------------------------------------
+
+.PHONY: format
+format: ## Format all Go code
+	gofmt -w -s .
+	go mod tidy
+
+.PHONY: format-check
+format-check: ## Fail if any Go file is not gofmt-clean
+	@unformatted=$$(gofmt -l -s .); \
+	if [ -n "$$unformatted" ]; then \
+		echo "ERROR: these files are not formatted. Run 'make format':"; \
+		echo "$$unformatted"; \
+		exit 1; \
+	fi
+	@echo "==> All files are formatted"
+
+.PHONY: vet
+vet: ## Run go vet
+	go vet ./...
+
+.PHONY: test
+test: ## Run the test suite with the race detector
+	go test -race -count=1 ./...
