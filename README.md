@@ -275,11 +275,8 @@ erDiagram
     }
 ```
 
-Every invariant that matters is enforced by the schema, not only by application
-code: the partial unique index above, a `CHECK` that an appointment is exactly
-30 minutes, a `CHECK` that a cancelled row carries both a reason and a
-timestamp, and an exclusion constraint stopping a doctor having overlapping
-working hours. A dedicated data-model document will follow the migrations.
+The invariants, and where each is enforced, are in
+[docs/data-model.md](docs/data-model.md).
 
 ---
 
@@ -379,6 +376,7 @@ be decided and recorded when that endpoint is built.
 | Document | What it covers |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | Layers, dependency direction, transaction boundaries, trust boundaries |
+| [docs/data-model.md](docs/data-model.md) | Tables, constraints, indexes, state transitions, timezone representation |
 | [docs/adr/](docs/adr/) | Numbered decision records |
 
 ---
