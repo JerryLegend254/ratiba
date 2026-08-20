@@ -368,8 +368,11 @@ implementation and the tests:
     booking and rescheduling all refuse, rather than offering slots that cannot
     be booked.
 
-Rescheduling to the slot an appointment already occupies is still open; it will
-be decided and recorded when that endpoint is built.
+11. **Rescheduling to the slot an appointment already occupies returns a
+    conflict**, not a silent success. A success would append a `rescheduled`
+    audit event describing a move that never happened, or return `200` having
+    recorded nothing — both make the audit trail untrustworthy.
+    ([ADR 0006](docs/adr/0006-reschedule-semantics.md))
 
 ---
 

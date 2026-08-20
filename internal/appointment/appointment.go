@@ -149,3 +149,15 @@ func ErrAlreadyCancelled() *apperror.Error {
 	return apperror.New(apperror.KindConflict, apperror.CodeAlreadyCancelled,
 		"This appointment has already been cancelled.")
 }
+
+// ErrRescheduleSameSlot is returned when a reschedule names the slot the
+// appointment already occupies.
+//
+// This is modelled as a conflict rather than a no-op success: the request
+// collides with the appointment's own current state, and treating it as a
+// success would append a misleading 'rescheduled' audit event describing a move
+// that never happened. See docs/adr/0006-reschedule-semantics.md.
+func ErrRescheduleSameSlot() *apperror.Error {
+	return apperror.New(apperror.KindConflict, apperror.CodeRescheduleSameSlot,
+		"The appointment is already booked at that time.")
+}

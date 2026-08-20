@@ -129,13 +129,14 @@ const (
 	CodeDoctorInactive      = "doctor_inactive"
 	CodePatientInactive     = "patient_inactive"
 
-	CodeSlotUnavailable  = "slot_unavailable"
-	CodeSlotNotAligned   = "slot_not_aligned"
-	CodeSlotOutsideHours = "slot_outside_working_hours"
-	CodeDoctorNotWorking = "doctor_not_working_on_date"
-	CodeSlotInPast       = "slot_in_past"
-	CodeSlotTooSoon      = "slot_too_soon"
-	CodeAlreadyCancelled = "appointment_already_cancelled"
+	CodeSlotUnavailable    = "slot_unavailable"
+	CodeSlotNotAligned     = "slot_not_aligned"
+	CodeSlotOutsideHours   = "slot_outside_working_hours"
+	CodeDoctorNotWorking   = "doctor_not_working_on_date"
+	CodeSlotInPast         = "slot_in_past"
+	CodeSlotTooSoon        = "slot_too_soon"
+	CodeAlreadyCancelled   = "appointment_already_cancelled"
+	CodeRescheduleSameSlot = "reschedule_same_slot"
 
 	CodeUnsupportedTimezone = "unsupported_timezone"
 )
