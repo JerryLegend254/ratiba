@@ -12,6 +12,9 @@ POSTGRES_IMAGE    ?= postgres:17.5-alpine
 CONTAINER         ?= ratiba-postgres
 
 DATABASE_URL ?= postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:$(POSTGRES_PORT)/$(POSTGRES_DB)?sslmode=disable
+
+# Exported so the migrate binary and, later, the API can read them.
+export DATABASE_URL
 export PGPASSWORD = $(POSTGRES_PASSWORD)
 
 .PHONY: help
@@ -41,17 +44,20 @@ db-stop: ## Stop and remove the local PostgreSQL container
 	docker rm -f $(CONTAINER)
 
 .PHONY: migrate-up
-migrate-up: ## Apply migrations with psql
-	@# The goose annotations are stripped here because there is no migration
-	@# binary yet. Applying the same files two ways would be a good source of
-	@# drift, so this is temporary: it is replaced by cmd/migrate once the Go
-	@# module has something to build.
-	@for f in db/migrations/*.sql; do \
-		echo "==> $$f"; \
-		awk '/^-- \+goose Down/{exit} !/^-- \+goose/{print}' "$$f" \
-			| psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -q; \
-	done
-	@echo "==> Schema applied"
+migrate-up: ## Apply all pending migrations
+	go run ./cmd/migrate up
+
+.PHONY: migrate-down
+migrate-down: ## Roll back the most recent migration
+	go run ./cmd/migrate down
+
+.PHONY: migrate-status
+migrate-status: ## Show which migrations have been applied
+	go run ./cmd/migrate status
+
+.PHONY: seed
+seed: ## Insert or refresh the deterministic demo dataset (safe to re-run)
+	go run ./cmd/migrate seed
 
 .PHONY: psql
 psql: ## Open a psql shell against the local database
