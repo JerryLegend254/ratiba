@@ -161,6 +161,7 @@ func newFixture(t *testing.T) *fixture {
 		clk, logging.Discard(), appointment.NopMetrics{},
 		appointment.ServiceConfig{
 			Policy:          appointment.DefaultPolicy(),
+			IdempotencyTTL:  24 * time.Hour,
 			DefaultPageSize: 20,
 			MaxPageSize:     100,
 		},

@@ -241,6 +241,14 @@ var problemCatalogue = map[string]problemDescription{
 		Code: apperror.CodeRescheduleSameSlot, Status: 409, Title: "Reschedule to the same slot",
 		Meaning: "The appointment already starts at that time. Choose a different slot, or make no request at all.",
 	},
+	apperror.CodeIdempotencyKeyReuse: {
+		Code: apperror.CodeIdempotencyKeyReuse, Status: 409, Title: "Idempotency key reuse",
+		Meaning: "This Idempotency-Key was already used with a different payload. Use a fresh key for a different booking.",
+	},
+	apperror.CodeInvalidIdempotencyKey: {
+		Code: apperror.CodeInvalidIdempotencyKey, Status: 400, Title: "Invalid idempotency key",
+		Meaning: "Idempotency-Key must be 8 to 255 printable ASCII characters.",
+	},
 	apperror.CodeUnsupportedTimezone: {
 		Code: apperror.CodeUnsupportedTimezone, Status: 500, Title: "Unsupported timezone",
 		Meaning: "The doctor's configured IANA timezone could not be resolved. This is a data problem; report it with the request_id.",

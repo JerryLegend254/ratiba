@@ -30,6 +30,10 @@ type Repository interface {
 	// ListUpcomingForPatient returns a page of the patient's future active
 	// appointments ordered by (starts_at, id), plus the unpaged total.
 	ListUpcomingForPatient(ctx context.Context, patientID uuid.UUID, from time.Time, page Page) ([]PatientAppointment, int64, error)
+
+	// FindIdempotencyRecord looks up a stored booking response. found is false
+	// when no record exists for the (patient, key) pair.
+	FindIdempotencyRecord(ctx context.Context, patientID uuid.UUID, key string) (record IdempotencyRecord, found bool, err error)
 }
 
 // Tx is the transactional write port. Every method here participates in the
@@ -54,6 +58,10 @@ type Tx interface {
 
 	// AppendEvent writes one append-only history entry.
 	AppendEvent(ctx context.Context, event Event) error
+
+	// SaveIdempotencyRecord persists a booking response for replay. Returns
+	// ErrIdempotencyKeyExists when a concurrent transaction committed first.
+	SaveIdempotencyRecord(ctx context.Context, record IdempotencyRecord) error
 }
 
 // ScheduleReader is the narrow slice of doctor.Repository this service needs.

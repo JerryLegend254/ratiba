@@ -112,6 +112,7 @@ func NewService(store *MemoryStore, clk clock.Clock) (*appointment.Service, erro
 		appointment.NopMetrics{},
 		appointment.ServiceConfig{
 			Policy:          appointment.DefaultPolicy(),
+			IdempotencyTTL:  24 * time.Hour,
 			DefaultPageSize: 20,
 			MaxPageSize:     100,
 		},

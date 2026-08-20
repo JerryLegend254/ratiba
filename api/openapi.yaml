@@ -77,7 +77,12 @@ paths:
         (`doctor_not_working_on_date`, `slot_not_aligned`,
         `slot_outside_working_hours`). Availability is checked last, by the
         database, and returns `slot_unavailable`.
+
+        Supplying `Idempotency-Key` makes retries safe: an identical repeat
+        returns the original `201` response with `Idempotency-Replayed: true`,
+        while reusing the key with a different body returns `409`.
       parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
         - $ref: '#/components/parameters/RequestId'
       requestBody:
         required: true
@@ -99,6 +104,9 @@ paths:
             Location:
               description: Path of the created appointment.
               schema: { type: string }
+            Idempotency-Replayed:
+              description: Present and "true" when this response was replayed from a stored Idempotency-Key record.
+              schema: { type: string, enum: ["true"] }
             X-Request-Id:
               $ref: '#/components/headers/XRequestId'
           content:
@@ -126,7 +134,10 @@ paths:
                     code: doctor_not_found
                     request_id: 018f4e0a1c2b7d3e9f012a3b4c5d6e7f
         '409':
-          description: 'Another active appointment already holds that slot. Code: `slot_unavailable`.'
+          description: |
+            The slot is taken, or the Idempotency-Key was reused with a
+            different payload. Codes: `slot_unavailable`,
+            `idempotency_key_reuse`.
           content:
             application/problem+json:
               schema:
@@ -770,6 +781,21 @@ components:
         minimum: 0
         default: 0
 
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Client-generated retry token, 8 to 255 printable ASCII characters.
+        Scoped to the patient in the request body. A repeat with the same key
+        and payload replays the original response; a repeat with a different
+        payload returns `409 idempotency_key_reuse`.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 255
+      example: 018f4e0a-1c2b-7d3e-9f01-2a3b4c5d6e7f
+
     RequestId:
       name: X-Request-Id
       in: header
@@ -788,7 +814,7 @@ components:
       description: |
         The request could not be understood. Codes: `malformed_json`,
         `unknown_field`, `trailing_content`, `invalid_path_parameter`,
-        `invalid_query_parameter`.
+        `invalid_query_parameter`, `invalid_idempotency_key`.
       content:
         application/problem+json:
           schema:

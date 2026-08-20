@@ -13,6 +13,7 @@ correct do not need a record.
 | [0002](0002-postgresql.md) | PostgreSQL as the system of record | Accepted |
 | [0003](0003-concurrency-strategy.md) | A partial unique index enforces the booking invariant | Accepted |
 | [0004](0004-timezones-and-slots.md) | Store instants, interpret in the doctor's timezone | Accepted |
+| [0005](0005-idempotent-booking.md) | Idempotency-Key on booking | Accepted |
 | [0006](0006-reschedule-semantics.md) | Rescheduling to the current slot is a conflict | Accepted |
 
 Format: context, decision, alternatives, consequences, date. Records are

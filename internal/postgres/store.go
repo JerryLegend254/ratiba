@@ -37,7 +37,10 @@ const (
 // Constraint names the adapter translates into domain errors. If a migration
 // ever renames one of these, the corresponding test in the integration suite
 // fails loudly rather than the conflict silently becoming a 500.
-const constraintActiveSlotUnique = "appointments_active_slot_uniq"
+const (
+	constraintActiveSlotUnique = "appointments_active_slot_uniq"
+	constraintIdempotencyScope = "idempotency_keys_scope_key"
+)
 
 // Store owns the connection pool and hands out the per-aggregate repositories.
 type Store struct {
@@ -117,8 +120,11 @@ func translateWriteError(err error) error {
 
 	switch {
 	case isPgErr(err, sqlStateUniqueViolation):
-		if constraintName(err) == constraintActiveSlotUnique {
+		switch constraintName(err) {
+		case constraintActiveSlotUnique:
 			return appointment.ErrSlotTaken
+		case constraintIdempotencyScope:
+			return appointment.ErrIdempotencyKeyExists
 		}
 
 	case isPgErr(err, sqlStateExclusionViolation):

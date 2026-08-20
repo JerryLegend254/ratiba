@@ -102,6 +102,20 @@ type PatientAppointment struct {
 	Doctor      DoctorSummary
 }
 
+// IdempotencyRecord is the persisted outcome of a booking request that carried
+// an Idempotency-Key. Snapshot holds the exact appointment state that was
+// returned the first time, so a replay answers with the original response even
+// if the appointment has since been cancelled or moved.
+type IdempotencyRecord struct {
+	PatientID      uuid.UUID
+	Key            string
+	Fingerprint    string
+	AppointmentID  uuid.UUID
+	ResponseStatus int
+	Snapshot       []byte
+	ExpiresAt      time.Time
+}
+
 // Page is a bounded offset window over a collection.
 type Page struct {
 	Limit  int32
@@ -118,6 +132,10 @@ var (
 	// because another active appointment already holds that doctor and start.
 	// This — not any earlier availability read — is the authority on conflicts.
 	ErrSlotTaken = errors.New("appointment: slot already taken")
+
+	// ErrIdempotencyKeyExists means a concurrent request committed the same
+	// (patient, key) pair first.
+	ErrIdempotencyKeyExists = errors.New("appointment: idempotency key already exists")
 
 	// ErrNotFound means no appointment row matched.
 	ErrNotFound = errors.New("appointment: not found")
@@ -160,4 +178,11 @@ func ErrAlreadyCancelled() *apperror.Error {
 func ErrRescheduleSameSlot() *apperror.Error {
 	return apperror.New(apperror.KindConflict, apperror.CodeRescheduleSameSlot,
 		"The appointment is already booked at that time.")
+}
+
+// ErrIdempotencyKeyReuse is returned when a key is replayed with a different
+// payload.
+func ErrIdempotencyKeyReuse() *apperror.Error {
+	return apperror.New(apperror.KindConflict, apperror.CodeIdempotencyKeyReuse,
+		"This Idempotency-Key was already used for a different booking request.")
 }

@@ -51,6 +51,9 @@ func TestServiceBook(t *testing.T) {
 		if err != nil {
 			t.Fatalf("expected the booking to succeed, got %v", err)
 		}
+		if result.Replayed {
+			t.Error("a first booking must not be marked as replayed")
+		}
 		if result.Appointment.Status != appointment.StatusBooked {
 			t.Errorf("expected status booked, got %s", result.Appointment.Status)
 		}
@@ -176,6 +179,137 @@ func TestServiceBook(t *testing.T) {
 		}
 		if events := store.Events(); len(events) != 0 {
 			t.Fatalf("expected no audit events after a failed transaction, found %d", len(events))
+		}
+	})
+}
+
+func TestServiceBookIdempotency(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	const key = "retry-key-000001"
+
+	t.Run("a retry with the same payload replays the original result", func(t *testing.T) {
+		t.Parallel()
+		service, store, _ := newFixture(t)
+
+		cmd := appointment.BookCommand{
+			DoctorID:       testsupport.NairobiDoctorID,
+			PatientID:      testsupport.ActivePatientID,
+			StartsAt:       nairobiAt(9, 0),
+			IdempotencyKey: key,
+		}
+
+		first, err := service.Book(ctx, cmd)
+		if err != nil {
+			t.Fatalf("first booking failed: %v", err)
+		}
+		second, err := service.Book(ctx, cmd)
+		if err != nil {
+			t.Fatalf("retry failed: %v", err)
+		}
+
+		if !second.Replayed {
+			t.Error("the retry should be marked as replayed")
+		}
+		if first.Appointment.ID != second.Appointment.ID {
+			t.Errorf("the retry created a different appointment: %s then %s",
+				first.Appointment.ID, second.Appointment.ID)
+		}
+		if count := store.ActiveCount(testsupport.NairobiDoctorID, cmd.StartsAt); count != 1 {
+			t.Fatalf("expected one appointment after a retry, found %d", count)
+		}
+		if events := store.Events(); len(events) != 1 {
+			t.Fatalf("a replay must not append a second audit event, found %d", len(events))
+		}
+	})
+
+	t.Run("reusing a key with a different payload is a conflict", func(t *testing.T) {
+		t.Parallel()
+		service, _, _ := newFixture(t)
+
+		if _, err := service.Book(ctx, appointment.BookCommand{
+			DoctorID: testsupport.NairobiDoctorID, PatientID: testsupport.ActivePatientID,
+			StartsAt: nairobiAt(9, 0), IdempotencyKey: key,
+		}); err != nil {
+			t.Fatalf("first booking failed: %v", err)
+		}
+
+		_, err := service.Book(ctx, appointment.BookCommand{
+			DoctorID: testsupport.NairobiDoctorID, PatientID: testsupport.ActivePatientID,
+			StartsAt: nairobiAt(10, 0), IdempotencyKey: key,
+		})
+		if code := errorCode(t, err); code != apperror.CodeIdempotencyKeyReuse {
+			t.Fatalf("expected %s, got %s", apperror.CodeIdempotencyKeyReuse, code)
+		}
+	})
+
+	t.Run("the replayed appointment reflects its original state, not its current one", func(t *testing.T) {
+		t.Parallel()
+		service, _, _ := newFixture(t)
+
+		cmd := appointment.BookCommand{
+			DoctorID: testsupport.NairobiDoctorID, PatientID: testsupport.ActivePatientID,
+			StartsAt: nairobiAt(9, 0), IdempotencyKey: key,
+		}
+		first, err := service.Book(ctx, cmd)
+		if err != nil {
+			t.Fatalf("first booking failed: %v", err)
+		}
+
+		if _, err := service.Cancel(ctx, appointment.CancelCommand{
+			ID: first.Appointment.ID, Reason: "changed my mind",
+		}); err != nil {
+			t.Fatalf("cancel failed: %v", err)
+		}
+
+		// The stored snapshot is what the client saw the first time. Returning
+		// the current row instead would answer a 201-shaped request with a
+		// cancelled appointment.
+		replayed, err := service.Book(ctx, cmd)
+		if err != nil {
+			t.Fatalf("replay failed: %v", err)
+		}
+		if replayed.Appointment.Status != appointment.StatusBooked {
+			t.Errorf("expected the replay to show the original booked state, got %s",
+				replayed.Appointment.Status)
+		}
+	})
+
+	t.Run("rejects a malformed key", func(t *testing.T) {
+		t.Parallel()
+		service, _, _ := newFixture(t)
+
+		for _, badKey := range []string{"short", strings.Repeat("x", 256), "has space", "has\ttab"} {
+			_, err := service.Book(ctx, appointment.BookCommand{
+				DoctorID: testsupport.NairobiDoctorID, PatientID: testsupport.ActivePatientID,
+				StartsAt: nairobiAt(9, 0), IdempotencyKey: badKey,
+			})
+			if code := errorCode(t, err); code != apperror.CodeInvalidIdempotencyKey {
+				t.Errorf("key %q: expected %s, got %s", badKey, apperror.CodeInvalidIdempotencyKey, code)
+			}
+		}
+	})
+
+	t.Run("the same key from a different patient is independent", func(t *testing.T) {
+		t.Parallel()
+		service, store, _ := newFixture(t)
+
+		if _, err := service.Book(ctx, appointment.BookCommand{
+			DoctorID: testsupport.NairobiDoctorID, PatientID: testsupport.ActivePatientID,
+			StartsAt: nairobiAt(9, 0), IdempotencyKey: key,
+		}); err != nil {
+			t.Fatalf("first booking failed: %v", err)
+		}
+		// Keys are scoped per patient, so this must book rather than collide.
+		if _, err := service.Book(ctx, appointment.BookCommand{
+			DoctorID: testsupport.NairobiDoctorID, PatientID: testsupport.OtherPatientID,
+			StartsAt: nairobiAt(10, 0), IdempotencyKey: key,
+		}); err != nil {
+			t.Fatalf("expected a second patient to be able to reuse the key value, got %v", err)
+		}
+		if count := store.ActiveCount(testsupport.NairobiDoctorID, nairobiAt(10, 0)); count != 1 {
+			t.Fatal("expected the second patient's booking to exist")
 		}
 	})
 }
@@ -776,6 +910,7 @@ func TestNewServiceRejectsBadWiring(t *testing.T) {
 	store := testsupport.NewClinic()
 	valid := appointment.ServiceConfig{
 		Policy:          appointment.DefaultPolicy(),
+		IdempotencyTTL:  time.Hour,
 		DefaultPageSize: 20,
 		MaxPageSize:     100,
 	}
@@ -785,17 +920,23 @@ func TestNewServiceRejectsBadWiring(t *testing.T) {
 		cfg  appointment.ServiceConfig
 	}{
 		{
+			name: "zero idempotency TTL",
+			cfg: appointment.ServiceConfig{
+				Policy: appointment.DefaultPolicy(), DefaultPageSize: 20, MaxPageSize: 100,
+			},
+		},
+		{
 			name: "default page size above the maximum",
 			cfg: appointment.ServiceConfig{
-				Policy:          appointment.DefaultPolicy(),
+				Policy: appointment.DefaultPolicy(), IdempotencyTTL: time.Hour,
 				DefaultPageSize: 200, MaxPageSize: 100,
 			},
 		},
 		{
 			name: "unusable slot duration",
 			cfg: appointment.ServiceConfig{
-				Policy:          appointment.Policy{SlotDuration: 45 * time.Minute, MinLeadTime: time.Hour},
-				DefaultPageSize: 20, MaxPageSize: 100,
+				Policy:         appointment.Policy{SlotDuration: 45 * time.Minute, MinLeadTime: time.Hour},
+				IdempotencyTTL: time.Hour, DefaultPageSize: 20, MaxPageSize: 100,
 			},
 		},
 	}

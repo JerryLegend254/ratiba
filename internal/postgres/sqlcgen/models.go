@@ -143,6 +143,18 @@ type DoctorWorkingHour struct {
 	MinuteRange   pgtype.Range[pgtype.Int4]
 }
 
+type IdempotencyKey struct {
+	ID                 uuid.UUID
+	PatientID          uuid.UUID
+	IdempotencyKey     string
+	RequestFingerprint string
+	AppointmentID      uuid.UUID
+	ResponseStatus     int16
+	ResponseBody       []byte
+	CreatedAt          time.Time
+	ExpiresAt          time.Time
+}
+
 type Patient struct {
 	ID        uuid.UUID
 	FullName  string

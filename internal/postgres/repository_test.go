@@ -17,6 +17,7 @@ import (
 	"github.com/JerryLegend254/ratiba/internal/appointment"
 	"github.com/JerryLegend254/ratiba/internal/platform/apperror"
 	"github.com/JerryLegend254/ratiba/internal/platform/calendar"
+	"github.com/JerryLegend254/ratiba/internal/platform/logging"
 	"github.com/JerryLegend254/ratiba/internal/postgres"
 )
 
@@ -370,6 +371,56 @@ func TestPatientAppointmentsOrderingAndPaging(t *testing.T) {
 	}
 	if len(seen) != 4 {
 		t.Errorf("paging returned %d distinct appointments, expected 4", len(seen))
+	}
+}
+
+// TestIdempotencyPersistence checks replay across service instances, which is
+// what happens when a retry lands on a different replica.
+func TestIdempotencyPersistence(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+	ctx := t.Context()
+
+	cmd := appointment.BookCommand{
+		DoctorID:       f.doctorID,
+		PatientID:      f.patients[0],
+		StartsAt:       slotAt(t, 13, 0),
+		IdempotencyKey: "persisted-key-" + f.doctorID.String()[:8],
+	}
+
+	first, err := f.service.Book(ctx, cmd)
+	if err != nil {
+		t.Fatalf("first booking failed: %v", err)
+	}
+
+	// A second service over the same pool stands in for a second replica.
+	other := newFixture(t)
+	replayService, err := appointment.NewService(
+		f.store.Appointments(), f.store.Doctors(), f.store.Patients(),
+		other.clock, logging.Discard(), appointment.NopMetrics{},
+		appointment.ServiceConfig{
+			Policy: appointment.DefaultPolicy(), IdempotencyTTL: 24 * time.Hour,
+			DefaultPageSize: 20, MaxPageSize: 100,
+		},
+	)
+	if err != nil {
+		t.Fatalf("build second service: %v", err)
+	}
+
+	replayed, err := replayService.Book(ctx, cmd)
+	if err != nil {
+		t.Fatalf("replay on a second instance failed: %v", err)
+	}
+	if !replayed.Replayed {
+		t.Error("expected the response to be flagged as replayed")
+	}
+	if replayed.Appointment.ID != first.Appointment.ID {
+		t.Errorf("the replay returned a different appointment: %s vs %s",
+			replayed.Appointment.ID, first.Appointment.ID)
+	}
+	if count := countActive(t, f.doctorID, cmd.StartsAt); count != 1 {
+		t.Fatalf("expected exactly 1 appointment, found %d", count)
 	}
 }
 

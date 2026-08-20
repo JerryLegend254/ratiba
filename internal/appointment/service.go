@@ -2,6 +2,9 @@ package appointment
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -21,6 +24,13 @@ import (
 // sourceAPI marks history entries created by an inbound HTTP request. It is
 // provenance, not identity: Ratiba has no authentication yet.
 const sourceAPI = "api"
+
+// Idempotency-Key bounds. The lower bound rejects keys too short to be
+// plausibly unique; both are also enforced by CHECK constraints.
+const (
+	MinIdempotencyKeyLength = 8
+	MaxIdempotencyKeyLength = 255
+)
 
 // MaxCancellationReasonLength bounds the free-text reason. The same limit is
 // enforced by a CHECK constraint, so a client cannot bypass it by any route.
@@ -43,6 +53,7 @@ const (
 	OperationReschedule = "reschedule"
 
 	OutcomeSucceeded = "succeeded"
+	OutcomeReplayed  = "replayed"
 	OutcomeConflict  = "conflict"
 	OutcomeRejected  = "rejected"
 	OutcomeFailed    = "failed"
@@ -59,6 +70,8 @@ func (NopMetrics) RecordOutcome(string, string) {}
 type ServiceConfig struct {
 	// Policy is the booking rule set.
 	Policy Policy
+	// IdempotencyTTL is how long a stored booking response stays replayable.
+	IdempotencyTTL time.Duration
 	// DefaultPageSize applies when a client does not ask for a page size.
 	DefaultPageSize int32
 	// MaxPageSize bounds any single response.
@@ -111,6 +124,9 @@ func NewService(
 	if _, err := NewPolicy(cfg.Policy.SlotDuration, cfg.Policy.MinLeadTime); err != nil {
 		return nil, fmt.Errorf("appointment: invalid policy: %w", err)
 	}
+	if cfg.IdempotencyTTL <= 0 {
+		return nil, errors.New("appointment: idempotency TTL must be positive")
+	}
 	if cfg.DefaultPageSize <= 0 || cfg.MaxPageSize <= 0 || cfg.DefaultPageSize > cfg.MaxPageSize {
 		return nil, errors.New("appointment: page sizes must be positive with default <= max")
 	}
@@ -130,11 +146,32 @@ type BookCommand struct {
 	PatientID uuid.UUID
 	// StartsAt is the requested slot start as an absolute instant.
 	StartsAt time.Time
+	// IdempotencyKey is optional. When present, a retry with the same key and
+	// the same payload returns the original result instead of booking twice.
+	IdempotencyKey string
+}
+
+// fingerprint hashes the meaningful content of the command.
+//
+// It is computed from the parsed fields rather than the raw request bytes, so
+// two byte-different but semantically identical retries (different key order,
+// different whitespace, "+00:00" vs "Z") are correctly recognised as the same
+// request. The "v1" prefix leaves room to change this scheme later without
+// silently reinterpreting stored fingerprints.
+func (c BookCommand) fingerprint() string {
+	sum := sha256.Sum256(fmt.Appendf(nil,
+		"v1|%s|%s|%s",
+		c.DoctorID, c.PatientID, c.StartsAt.UTC().Format(time.RFC3339Nano),
+	))
+	return hex.EncodeToString(sum[:])
 }
 
 // BookResult is the outcome of a booking attempt.
 type BookResult struct {
 	Appointment Appointment
+	// Replayed reports that this response was served from a stored
+	// Idempotency-Key record rather than newly created.
+	Replayed bool
 }
 
 // Book creates an appointment.
@@ -151,6 +188,25 @@ func (s *Service) Book(ctx context.Context, cmd BookCommand) (BookResult, error)
 		return BookResult{}, apperror.New(apperror.KindUnprocessable, apperror.CodeValidationFailed,
 			"A start time is required.")
 	}
+	if cmd.IdempotencyKey != "" {
+		if err := validateIdempotencyKey(cmd.IdempotencyKey); err != nil {
+			return BookResult{}, err
+		}
+	}
+
+	fingerprint := cmd.fingerprint()
+
+	// Fast path: a key we have already answered.
+	if cmd.IdempotencyKey != "" {
+		record, found, err := s.repo.FindIdempotencyRecord(ctx, cmd.PatientID, cmd.IdempotencyKey)
+		if err != nil {
+			return BookResult{}, apperror.Internal(fmt.Errorf("look up idempotency record: %w", err))
+		}
+		if found {
+			return s.replay(record, fingerprint)
+		}
+	}
+
 	doc, err := s.loadBookableDoctor(ctx, cmd.DoctorID)
 	if err != nil {
 		s.metrics.RecordOutcome(OperationBook, OutcomeRejected)
@@ -186,6 +242,23 @@ func (s *Service) Book(ctx context.Context, cmd BookCommand) (BookResult, error)
 		}); err != nil {
 			return err
 		}
+		if cmd.IdempotencyKey != "" {
+			snapshot, err := encodeSnapshot(appt)
+			if err != nil {
+				return err
+			}
+			if err := tx.SaveIdempotencyRecord(ctx, IdempotencyRecord{
+				PatientID:      cmd.PatientID,
+				Key:            cmd.IdempotencyKey,
+				Fingerprint:    fingerprint,
+				AppointmentID:  appt.ID,
+				ResponseStatus: 201,
+				Snapshot:       snapshot,
+				ExpiresAt:      now.Add(s.cfg.IdempotencyTTL),
+			}); err != nil {
+				return err
+			}
+		}
 		created = appt
 		return nil
 	})
@@ -210,6 +283,16 @@ func (s *Service) Book(ctx context.Context, cmd BookCommand) (BookResult, error)
 		)
 		return BookResult{}, ErrSlotUnavailable()
 
+	case errors.Is(txErr, ErrIdempotencyKeyExists):
+		// A concurrent request with the same key committed first. Its
+		// transaction included the stored response, so the record is now
+		// visible to a fresh read and the retry can be answered from it.
+		record, found, err := s.repo.FindIdempotencyRecord(ctx, cmd.PatientID, cmd.IdempotencyKey)
+		if err != nil || !found {
+			return BookResult{}, apperror.Internal(fmt.Errorf("resolve concurrent idempotent booking: %w", txErr))
+		}
+		return s.replay(record, fingerprint)
+
 	default:
 		s.metrics.RecordOutcome(OperationBook, OutcomeFailed)
 		if appErr, ok := apperror.From(txErr); ok {
@@ -217,6 +300,20 @@ func (s *Service) Book(ctx context.Context, cmd BookCommand) (BookResult, error)
 		}
 		return BookResult{}, apperror.Internal(fmt.Errorf("book appointment: %w", txErr))
 	}
+}
+
+// replay answers a booking retry from a stored response.
+func (s *Service) replay(record IdempotencyRecord, fingerprint string) (BookResult, error) {
+	if record.Fingerprint != fingerprint {
+		s.metrics.RecordOutcome(OperationBook, OutcomeConflict)
+		return BookResult{}, ErrIdempotencyKeyReuse()
+	}
+	appt, err := decodeSnapshot(record.Snapshot)
+	if err != nil {
+		return BookResult{}, apperror.Internal(fmt.Errorf("decode idempotency snapshot: %w", err))
+	}
+	s.metrics.RecordOutcome(OperationBook, OutcomeReplayed)
+	return BookResult{Appointment: appt, Replayed: true}, nil
 }
 
 // CancelCommand cancels an appointment.
@@ -571,4 +668,65 @@ func normaliseCancellationReason(raw string) (string, error) {
 			})
 	}
 	return reason, nil
+}
+
+// validateIdempotencyKey bounds the header value. Keys are echoed into no logs
+// and stored verbatim, so the only requirements are length and printability.
+func validateIdempotencyKey(key string) error {
+	length := utf8.RuneCountInString(key)
+	if length < MinIdempotencyKeyLength || length > MaxIdempotencyKeyLength {
+		return apperror.Newf(apperror.KindInvalidInput, apperror.CodeInvalidIdempotencyKey,
+			"Idempotency-Key must be between %d and %d characters.",
+			MinIdempotencyKeyLength, MaxIdempotencyKeyLength)
+	}
+	for _, r := range key {
+		if r < 0x21 || r > 0x7e {
+			return apperror.New(apperror.KindInvalidInput, apperror.CodeInvalidIdempotencyKey,
+				"Idempotency-Key must contain only printable ASCII characters.")
+		}
+	}
+	return nil
+}
+
+// appointmentSnapshot is the stored form of an idempotent booking response.
+//
+// It has explicit field names so a future rename of an Appointment field cannot
+// silently invalidate records already in the database.
+type appointmentSnapshot struct {
+	Version   int       `json:"v"`
+	ID        uuid.UUID `json:"id"`
+	DoctorID  uuid.UUID `json:"doctor_id"`
+	PatientID uuid.UUID `json:"patient_id"`
+	StartsAt  time.Time `json:"starts_at"`
+	EndsAt    time.Time `json:"ends_at"`
+	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func encodeSnapshot(a Appointment) ([]byte, error) {
+	data, err := json.Marshal(appointmentSnapshot{
+		Version: 1, ID: a.ID, DoctorID: a.DoctorID, PatientID: a.PatientID,
+		StartsAt: a.StartsAt, EndsAt: a.EndsAt, Status: string(a.Status),
+		CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode appointment snapshot: %w", err)
+	}
+	return data, nil
+}
+
+func decodeSnapshot(data []byte) (Appointment, error) {
+	var snap appointmentSnapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		return Appointment{}, fmt.Errorf("decode appointment snapshot: %w", err)
+	}
+	if snap.Version != 1 {
+		return Appointment{}, fmt.Errorf("unsupported appointment snapshot version %d", snap.Version)
+	}
+	return Appointment{
+		ID: snap.ID, DoctorID: snap.DoctorID, PatientID: snap.PatientID,
+		StartsAt: snap.StartsAt, EndsAt: snap.EndsAt, Status: Status(snap.Status),
+		CreatedAt: snap.CreatedAt, UpdatedAt: snap.UpdatedAt,
+	}, nil
 }

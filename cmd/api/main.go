@@ -104,6 +104,7 @@ func run() error {
 		metrics,
 		appointment.ServiceConfig{
 			Policy:          policy,
+			IdempotencyTTL:  cfg.Booking.IdempotencyTTL,
 			DefaultPageSize: cfg.Booking.DefaultPageSize,
 			MaxPageSize:     cfg.Booking.MaxPageSize,
 		},

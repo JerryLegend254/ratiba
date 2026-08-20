@@ -169,7 +169,8 @@ type TelemetryConfig struct {
 // is a migration plus a code change, not a redeploy. The domain's Policy type
 // still parameterises it so unit tests can exercise other durations.
 type BookingConfig struct {
-	MinLeadTime     time.Duration
+	MinLeadTime time.Duration
+	// IdempotencyTTL is how long a stored booking response stays replayable.
 	IdempotencyTTL  time.Duration
 	DefaultPageSize int32
 	MaxPageSize     int32
@@ -245,6 +246,7 @@ func Load(build BuildInfo) (Config, error) {
 
 	cfg.Booking = BookingConfig{
 		MinLeadTime:     p.duration("BOOKING_MIN_LEAD_TIME", time.Hour),
+		IdempotencyTTL:  p.duration("BOOKING_IDEMPOTENCY_TTL", 24*time.Hour),
 		DefaultPageSize: p.int32Range("PAGE_SIZE_DEFAULT", 20, 1, 1000),
 		MaxPageSize:     p.int32Range("PAGE_SIZE_MAX", 100, 1, 1000),
 	}
@@ -295,6 +297,9 @@ func validate(p *parser, cfg *Config) {
 	}
 	if cfg.Booking.MinLeadTime < 0 {
 		p.fail("BOOKING_MIN_LEAD_TIME", "must not be negative")
+	}
+	if cfg.Booking.IdempotencyTTL <= 0 {
+		p.fail("BOOKING_IDEMPOTENCY_TTL", "must be positive")
 	}
 
 	switch cfg.Logging.Format {

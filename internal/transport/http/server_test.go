@@ -318,6 +318,49 @@ func TestBookAppointmentEndpoint(t *testing.T) {
 		}
 	})
 
+	t.Run("idempotent retries replay the original response", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		headers := map[string]string{"Idempotency-Key": "http-retry-000001"}
+
+		first := h.do(t, http.MethodPost, "/appointments", bookBody(t, 9, 0), headers)
+		if first.Code != http.StatusCreated {
+			t.Fatalf("first booking returned %d", first.Code)
+		}
+		second := h.do(t, http.MethodPost, "/appointments", bookBody(t, 9, 0), headers)
+		if second.Code != http.StatusCreated {
+			t.Fatalf("retry returned %d, expected the original 201", second.Code)
+		}
+		if second.Header().Get("Idempotency-Replayed") != "true" {
+			t.Error("a replayed response must be flagged with Idempotency-Replayed")
+		}
+
+		var firstBody, secondBody map[string]any
+		decodeBody(t, first, &firstBody)
+		decodeBody(t, second, &secondBody)
+		if firstBody["id"] != secondBody["id"] {
+			t.Error("the retry created a different appointment")
+		}
+	})
+
+	t.Run("a reused key with a different body is 409", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		headers := map[string]string{"Idempotency-Key": "http-retry-000002"}
+
+		h.do(t, http.MethodPost, "/appointments", bookBody(t, 9, 0), headers)
+		recorder := h.do(t, http.MethodPost, "/appointments", bookBody(t, 10, 0), headers)
+		assertProblem(t, recorder, http.StatusConflict, apperror.CodeIdempotencyKeyReuse)
+	})
+
+	t.Run("a malformed idempotency key is 400", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+
+		recorder := h.do(t, http.MethodPost, "/appointments", bookBody(t, 9, 0),
+			map[string]string{"Idempotency-Key": "short"})
+		assertProblem(t, recorder, http.StatusBadRequest, apperror.CodeInvalidIdempotencyKey)
+	})
 }
 
 func TestAvailabilityEndpoint(t *testing.T) {

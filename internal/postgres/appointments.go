@@ -102,6 +102,35 @@ func (r *AppointmentRepository) ListUpcomingForPatient(
 	return items, total, nil
 }
 
+// FindIdempotencyRecord implements appointment.Repository.
+func (r *AppointmentRepository) FindIdempotencyRecord(
+	ctx context.Context,
+	patientID uuid.UUID,
+	key string,
+) (appointment.IdempotencyRecord, bool, error) {
+	row, err := r.queries.GetIdempotencyRecord(ctx, sqlcgen.GetIdempotencyRecordParams{
+		PatientID: patientID, IdempotencyKey: key,
+	})
+	if err != nil {
+		if noRows(err) {
+			return appointment.IdempotencyRecord{}, false, nil
+		}
+		return appointment.IdempotencyRecord{}, false, fmt.Errorf("get idempotency record: %w", err)
+	}
+	return toIdempotencyRecord(row), true, nil
+}
+
+// PurgeExpiredIdempotencyRecords deletes records past their TTL and returns how
+// many were removed. Exposed for the maintenance command described in
+// docs/operations.md.
+func (r *AppointmentRepository) PurgeExpiredIdempotencyRecords(ctx context.Context, now time.Time) (int64, error) {
+	deleted, err := r.queries.DeleteExpiredIdempotencyRecords(ctx, now)
+	if err != nil {
+		return 0, fmt.Errorf("purge expired idempotency records: %w", err)
+	}
+	return deleted, nil
+}
+
 // txRepository implements appointment.Tx against a single transaction.
 type txRepository struct {
 	queries *sqlcgen.Queries
@@ -183,6 +212,22 @@ func (t *txRepository) AppendEvent(ctx context.Context, event appointment.Event)
 	return nil
 }
 
+// SaveIdempotencyRecord implements appointment.Tx.
+func (t *txRepository) SaveIdempotencyRecord(ctx context.Context, record appointment.IdempotencyRecord) error {
+	if _, err := t.queries.CreateIdempotencyRecord(ctx, sqlcgen.CreateIdempotencyRecordParams{
+		PatientID:          record.PatientID,
+		IdempotencyKey:     record.Key,
+		RequestFingerprint: record.Fingerprint,
+		AppointmentID:      record.AppointmentID,
+		ResponseStatus:     int16(record.ResponseStatus), //nolint:gosec // bounded to 100..599 by a CHECK constraint
+		ResponseBody:       record.Snapshot,
+		ExpiresAt:          record.ExpiresAt,
+	}); err != nil {
+		return translateWriteError(fmt.Errorf("save idempotency record: %w", err))
+	}
+	return nil
+}
+
 func toAppointment(row sqlcgen.Appointment) appointment.Appointment {
 	return appointment.Appointment{
 		ID:                 row.ID,
@@ -195,5 +240,17 @@ func toAppointment(row sqlcgen.Appointment) appointment.Appointment {
 		CancelledAt:        row.CancelledAt,
 		CreatedAt:          row.CreatedAt,
 		UpdatedAt:          row.UpdatedAt,
+	}
+}
+
+func toIdempotencyRecord(row sqlcgen.IdempotencyKey) appointment.IdempotencyRecord {
+	return appointment.IdempotencyRecord{
+		PatientID:      row.PatientID,
+		Key:            row.IdempotencyKey,
+		Fingerprint:    row.RequestFingerprint,
+		AppointmentID:  row.AppointmentID,
+		ResponseStatus: int(row.ResponseStatus),
+		Snapshot:       row.ResponseBody,
+		ExpiresAt:      row.ExpiresAt,
 	}
 }

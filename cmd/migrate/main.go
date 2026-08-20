@@ -63,6 +63,7 @@ Commands:
   status             Show which migrations have been applied.
   version            Print the current schema version.
   seed               Insert or refresh the deterministic demo dataset.
+  purge-idempotency  Delete expired idempotency records.
 
 Environment:
   DATABASE_URL       PostgreSQL connection string (required).
@@ -105,8 +106,11 @@ func run() error {
 		return fmt.Errorf("ping database: %w", err)
 	}
 
-	if command == "seed" {
+	switch command {
+	case "seed":
 		return seed(ctx, pool, logger)
+	case "purge-idempotency":
+		return purgeIdempotency(ctx, pool, logger)
 	}
 
 	return withAdvisoryLock(ctx, pool, logger, func(ctx context.Context) error {

@@ -160,5 +160,8 @@ const (
 	CodeAlreadyCancelled   = "appointment_already_cancelled"
 	CodeRescheduleSameSlot = "reschedule_same_slot"
 
+	CodeIdempotencyKeyReuse   = "idempotency_key_reuse"
+	CodeInvalidIdempotencyKey = "invalid_idempotency_key"
+
 	CodeUnsupportedTimezone = "unsupported_timezone"
 )

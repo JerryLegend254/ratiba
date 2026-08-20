@@ -330,6 +330,18 @@ database constraint with a distributed transaction — a correctness downgrade, 
 a scaling strategy. Clear internal seams keep extraction possible later.
 ([ADR 0001](docs/adr/0001-modular-monolith.md))
 
+### Idempotent booking
+
+`POST /appointments` accepts an `Idempotency-Key`. The key, a fingerprint of the
+request and a snapshot of the original response are written in the **same
+transaction** as the appointment, so a committed key always has a committed
+appointment and a retry can be answered from the stored response alone.
+
+The failure this protects against is not a double-click — it is a network
+timeout, where the client cannot tell whether the booking happened. Retrying
+risks a duplicate; not retrying risks a patient believing they have an
+appointment they do not. ([ADR 0005](docs/adr/0005-idempotent-booking.md))
+
 ### Deliberately out of scope
 
 | Not building | Why |

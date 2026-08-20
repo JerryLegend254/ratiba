@@ -252,3 +252,17 @@ func validateInterval(hours seedHours) error {
 	}
 	return nil
 }
+
+// purgeIdempotency deletes expired replay records.
+//
+// Kept as an explicit command rather than a background goroutine in the API:
+// a scheduled job is visible, has logs, and cannot silently stop running the
+// way a forgotten goroutine can.
+func purgeIdempotency(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {
+	tag, err := pool.Exec(ctx, `DELETE FROM idempotency_keys WHERE expires_at <= now()`)
+	if err != nil {
+		return fmt.Errorf("purge expired idempotency records: %w", err)
+	}
+	logger.Info("purged expired idempotency records", slog.Int64("deleted", tag.RowsAffected()))
+	return nil
+}

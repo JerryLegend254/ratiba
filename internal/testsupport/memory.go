@@ -15,6 +15,7 @@ package testsupport
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"sync"
 	"time"
@@ -34,6 +35,7 @@ type MemoryStore struct {
 	workingHours map[uuid.UUID][]doctor.WorkingHours
 	patients     map[uuid.UUID]patient.Patient
 	appointments map[uuid.UUID]appointment.Appointment
+	idempotency  map[string]appointment.IdempotencyRecord
 
 	events []appointment.Event
 
@@ -51,6 +53,7 @@ func NewMemoryStore() *MemoryStore {
 		workingHours: map[uuid.UUID][]doctor.WorkingHours{},
 		patients:     map[uuid.UUID]patient.Patient{},
 		appointments: map[uuid.UUID]appointment.Appointment{},
+		idempotency:  map[string]appointment.IdempotencyRecord{},
 	}
 }
 
@@ -119,8 +122,8 @@ func (s *MemoryStore) Patients() *MemoryPatients { return &MemoryPatients{store:
 func (s *MemoryStore) Appointments() *MemoryAppointments { return &MemoryAppointments{store: s} }
 
 // snapshot copies the mutable state so a failed transaction can restore it.
-func (s *MemoryStore) snapshot() (map[uuid.UUID]appointment.Appointment, []appointment.Event) {
-	return maps.Clone(s.appointments), append([]appointment.Event(nil), s.events...)
+func (s *MemoryStore) snapshot() (map[uuid.UUID]appointment.Appointment, map[string]appointment.IdempotencyRecord, []appointment.Event) {
+	return maps.Clone(s.appointments), maps.Clone(s.idempotency), append([]appointment.Event(nil), s.events...)
 }
 
 // MemoryDoctors implements doctor.Repository.
@@ -225,16 +228,16 @@ func (a *MemoryAppointments) WithinTx(ctx context.Context, fn func(context.Conte
 	a.store.mu.Lock()
 	defer a.store.mu.Unlock()
 
-	appointments, events := a.store.snapshot()
+	appointments, idempotency, events := a.store.snapshot()
 
 	if err := fn(ctx, &memoryTx{store: a.store}); err != nil {
-		a.store.appointments, a.store.events = appointments, events
+		a.store.appointments, a.store.idempotency, a.store.events = appointments, idempotency, events
 		return err
 	}
 	if a.store.FailWith != nil {
 		err := a.store.FailWith
 		a.store.FailWith = nil
-		a.store.appointments, a.store.events = appointments, events
+		a.store.appointments, a.store.idempotency, a.store.events = appointments, idempotency, events
 		return err
 	}
 	return nil
@@ -301,6 +304,16 @@ func (a *MemoryAppointments) ListUpcomingForPatient(
 
 	total := int64(len(matching))
 	return paginate(matching, page.Limit, page.Offset), total, nil
+}
+
+// FindIdempotencyRecord implements appointment.Repository.
+func (a *MemoryAppointments) FindIdempotencyRecord(
+	_ context.Context, patientID uuid.UUID, key string,
+) (appointment.IdempotencyRecord, bool, error) {
+	a.store.mu.Lock()
+	defer a.store.mu.Unlock()
+	record, ok := a.store.idempotency[idempotencyKey(patientID, key)]
+	return record, ok, nil
 }
 
 // memoryTx implements appointment.Tx. The store's lock is already held by
@@ -385,4 +398,18 @@ func (t *memoryTx) Move(_ context.Context, id uuid.UUID, slot appointment.Slot) 
 func (t *memoryTx) AppendEvent(_ context.Context, event appointment.Event) error {
 	t.store.events = append(t.store.events, event)
 	return nil
+}
+
+// SaveIdempotencyRecord implements appointment.Tx.
+func (t *memoryTx) SaveIdempotencyRecord(_ context.Context, record appointment.IdempotencyRecord) error {
+	key := idempotencyKey(record.PatientID, record.Key)
+	if _, exists := t.store.idempotency[key]; exists {
+		return appointment.ErrIdempotencyKeyExists
+	}
+	t.store.idempotency[key] = record
+	return nil
+}
+
+func idempotencyKey(patientID uuid.UUID, key string) string {
+	return fmt.Sprintf("%s|%s", patientID, key)
 }

@@ -2,6 +2,7 @@ package http
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/JerryLegend254/ratiba/internal/appointment"
@@ -10,6 +11,8 @@ import (
 // handleBookAppointment implements POST /appointments.
 //
 // Responds 201 with the created appointment, or 409 when the slot was taken.
+// A retry carrying the same Idempotency-Key and the same payload returns the
+// original 201 body and sets Idempotency-Replayed: true.
 func (s *Server) handleBookAppointment(w http.ResponseWriter, r *http.Request) {
 	body, err := decodeJSON[bookAppointmentRequest](w, r, s.maxBodyBytes)
 	if err != nil {
@@ -34,15 +37,19 @@ func (s *Server) handleBookAppointment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := s.appointments.Book(r.Context(), appointment.BookCommand{
-		DoctorID:  doctorID,
-		PatientID: patientID,
-		StartsAt:  startsAt,
+		DoctorID:       doctorID,
+		PatientID:      patientID,
+		StartsAt:       startsAt,
+		IdempotencyKey: strings.TrimSpace(r.Header.Get("Idempotency-Key")),
 	})
 	if err != nil {
 		writeProblem(w, r, err, s.logger)
 		return
 	}
 
+	if result.Replayed {
+		w.Header().Set("Idempotency-Replayed", "true")
+	}
 	w.Header().Set("Location", "/appointments/"+result.Appointment.ID.String())
 	writeJSON(w, r, http.StatusCreated, toAppointmentResponse(result.Appointment), s.logger)
 }
