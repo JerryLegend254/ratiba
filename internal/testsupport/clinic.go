@@ -103,12 +103,18 @@ func NewClinic() *MemoryStore {
 // NewService builds an appointment service over the store with a fixed clock
 // and no log output.
 func NewService(store *MemoryStore, clk clock.Clock) (*appointment.Service, error) {
+	return NewServiceWithLogger(store, clk, logging.Discard())
+}
+
+// NewServiceWithLogger is NewService with log output a test can inspect, for
+// asserting on what the service does and does not write.
+func NewServiceWithLogger(store *MemoryStore, clk clock.Clock, logger *slog.Logger) (*appointment.Service, error) {
 	return appointment.NewService(
 		store.Appointments(),
 		store.Doctors(),
 		store.Patients(),
 		clk,
-		logging.Discard(),
+		logger,
 		appointment.NopMetrics{},
 		appointment.ServiceConfig{
 			Policy:          appointment.DefaultPolicy(),

@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"log/slog"
+
 	"github.com/JerryLegend254/ratiba/api"
 	"github.com/JerryLegend254/ratiba/internal/platform/apperror"
 	"github.com/JerryLegend254/ratiba/internal/platform/clock"
@@ -39,14 +41,22 @@ type harness struct {
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
+	h, _ := newHarnessWithLogs(t)
+	return h
+}
+
+// newHarnessWithLogs returns a harness plus the buffer its logs are written to.
+//
+// The logger is built with logging.New, exactly as production does, so the
+// context handler that injects request_id and trace_id is present. A bare
+// slog.JSONHandler would silently omit them and make the correlation assertions
+// meaningless. The level is debug so probe routes, which are logged at debug to
+// keep them out of production log volume, are still visible here.
+func newHarnessWithLogs(t *testing.T) (*harness, *strings.Builder) {
+	t.Helper()
 
 	store := testsupport.NewClinic()
 	clk := testsupport.NewFixedClock()
-
-	service, err := testsupport.NewService(store, clk)
-	if err != nil {
-		t.Fatalf("build service: %v", err)
-	}
 
 	cfg := config.Config{
 		Env:         config.EnvTest,
@@ -54,6 +64,17 @@ func newHarness(t *testing.T) *harness {
 		Build:       config.BuildInfo{Version: "test", Commit: "abc1234", BuildTime: "now"},
 		HTTP:        config.HTTPConfig{MaxRequestBodyBytes: maxTestBodyBytes, HandlerTimeout: 5 * time.Second},
 		Booking:     config.BookingConfig{DefaultPageSize: 20, MaxPageSize: 100},
+		Logging:     config.LoggingConfig{Level: slog.LevelDebug, Format: "json"},
+	}
+
+	logs := &strings.Builder{}
+	logger := logging.New(logs, cfg)
+
+	// The same logger reaches the service, so domain events and access logs
+	// land in one stream, as they do in production.
+	service, err := testsupport.NewServiceWithLogger(store, clk, logger)
+	if err != nil {
+		t.Fatalf("build service: %v", err)
 	}
 
 	readiness := httpserver.NewReadinessGate()
@@ -66,7 +87,7 @@ func newHarness(t *testing.T) *harness {
 		Health:       store,
 		Readiness:    readiness,
 		Metrics:      observability.NewMetrics(cfg),
-		Logger:       logging.Discard(),
+		Logger:       logger,
 		OpenAPISpec:  api.OpenAPISpec,
 	})
 
@@ -76,7 +97,7 @@ func newHarness(t *testing.T) *harness {
 		store:     store,
 		clock:     clk,
 		readiness: readiness,
-	}
+	}, logs
 }
 
 // do issues a request against the router and returns the recorded response.

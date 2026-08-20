@@ -85,13 +85,14 @@ func (s *Server) observe(next http.Handler) http.Handler {
 		s.metrics.IncInFlight()
 		defer s.metrics.DecInFlight()
 
-		recorder := &responseRecorder{ResponseWriter: w, status: http.StatusOK}
+		recorder := &responseRecorder{ResponseWriter: w}
 		next.ServeHTTP(recorder, r)
 
 		route := routeTemplate(r)
 		duration := time.Since(start)
+		status := recorder.statusCode()
 
-		s.metrics.ObserveRequest(r.Method, route, recorder.status, duration, recorder.written)
+		s.metrics.ObserveRequest(r.Method, route, status, duration, recorder.written)
 
 		// Name the span after the matched route, for the same cardinality
 		// reason. otelhttp created it before routing, so it starts out named
@@ -100,7 +101,7 @@ func (s *Server) observe(next http.Handler) http.Handler {
 			span.SetName(r.Method + " " + route)
 			span.SetAttributes(
 				attribute.String("http.route", route),
-				attribute.Int("http.response.status_code", recorder.status),
+				attribute.Int("http.response.status_code", status),
 			)
 		}
 
@@ -108,7 +109,7 @@ func (s *Server) observe(next http.Handler) http.Handler {
 		// them at info drowns real traffic; they are still counted in metrics.
 		level := slog.LevelInfo
 		switch {
-		case recorder.status >= http.StatusInternalServerError:
+		case status >= http.StatusInternalServerError:
 			level = slog.LevelError
 		case isProbePath(r.URL.Path):
 			level = slog.LevelDebug
@@ -118,7 +119,7 @@ func (s *Server) observe(next http.Handler) http.Handler {
 			slog.String("event", "http.request"),
 			slog.String("method", r.Method),
 			slog.String("route", route),
-			slog.Int("status", recorder.status),
+			slog.Int("status", status),
 			slog.Int64("duration_ms", duration.Milliseconds()),
 			slog.Int64("response_bytes", recorder.written),
 			slog.String("user_agent", truncate(r.UserAgent(), 120)),
@@ -195,12 +196,12 @@ func (s *Server) timeout(duration time.Duration) func(http.Handler) http.Handler
 			ctx, cancel := context.WithTimeout(r.Context(), duration)
 			defer cancel()
 
-			recorder := &responseRecorder{ResponseWriter: w, status: 0}
+			recorder := &responseRecorder{ResponseWriter: w}
 			next.ServeHTTP(recorder, r.WithContext(ctx))
 
 			// If the handler returned without writing because its context
 			// expired, answer with a timeout instead of an empty 200.
-			if recorder.status == 0 && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			if !recorder.wrote() && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				writeProblem(w, r, apperror.New(apperror.KindUnavailable, apperror.CodeRequestTimeout,
 					"The request exceeded the server's processing budget."), s.logger)
 			}
@@ -283,15 +284,23 @@ func (s *Server) requireMetricsToken(token string) func(http.Handler) http.Handl
 	}
 }
 
-// responseRecorder captures the status and byte count for the access log.
+// responseRecorder captures the status and byte count for logging and metrics.
+//
+// status stays 0 until something is actually written. Seeding it with 200 would
+// be a subtle and expensive mistake: WriteHeader only records the FIRST status
+// (net/http ignores subsequent calls, so the recorder must match that
+// behaviour), and a pre-seeded 200 is already "first" — every 4xx and 5xx would
+// then be logged and counted as a success. Use statusCode() to read it, which
+// applies net/http's own default for a handler that wrote a body without ever
+// calling WriteHeader.
 type responseRecorder struct {
 	http.ResponseWriter
 	status  int
 	written int64
 }
 
-// WriteHeader records the status on its way through. net/http ignores every
-// call after the first, so the recorder matches that and keeps the first.
+// WriteHeader records the first status written, matching net/http, which
+// ignores every call after the first.
 func (r *responseRecorder) WriteHeader(status int) {
 	if r.status == 0 {
 		r.status = status
@@ -299,8 +308,8 @@ func (r *responseRecorder) WriteHeader(status int) {
 	r.ResponseWriter.WriteHeader(status)
 }
 
-// Write records the byte count, defaulting the status to 200 for a handler that
-// writes without calling WriteHeader.
+// Write records the byte count and, for a handler that never called
+// WriteHeader, pins the implicit 200 net/http will have sent.
 func (r *responseRecorder) Write(b []byte) (int, error) {
 	if r.status == 0 {
 		r.status = http.StatusOK
@@ -308,6 +317,18 @@ func (r *responseRecorder) Write(b []byte) (int, error) {
 	n, err := r.ResponseWriter.Write(b)
 	r.written += int64(n)
 	return n, err
+}
+
+// wrote reports whether the handler produced any response at all.
+func (r *responseRecorder) wrote() bool { return r.status != 0 }
+
+// statusCode returns the status actually sent, defaulting to 200 for a handler
+// that returned without writing anything.
+func (r *responseRecorder) statusCode() int {
+	if r.status == 0 {
+		return http.StatusOK
+	}
+	return r.status
 }
 
 // Unwrap exposes the underlying writer so http.ResponseController can reach
