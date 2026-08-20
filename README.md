@@ -303,14 +303,16 @@ exclusion constraint. Recorded in
 
 ### One policy shared by three endpoints
 
-Availability, booking and rescheduling will run through the same policy object,
+Availability, booking and rescheduling run through the same `appointment.Policy`,
 so a slot offered by the availability endpoint is bookable *by construction* and
 a reschedule destination is validated by literally the same code as a fresh
 booking.
 
-"Aligned to `:00`/`:30`" will be defined as membership in the generated slot
-list rather than a separate modulo check. Two rules that must agree eventually
-disagree — particularly across a DST transition.
+"Aligned to `:00`/`:30`" is defined as membership in the generated slot list
+rather than a separate modulo check. Two rules that must agree eventually
+disagree — particularly across a DST transition, where wall-clock alignment and
+30-real-minute stepping diverge. A test feeds every offered slot back through
+the booking validator to keep the two honest.
 
 ### Timezones: store instants, interpret in the doctor's zone
 
@@ -378,6 +380,9 @@ be decided and recorded when that endpoint is built.
 | [docs/architecture.md](docs/architecture.md) | Layers, dependency direction, transaction boundaries, trust boundaries |
 | [docs/data-model.md](docs/data-model.md) | Tables, constraints, indexes, state transitions, timezone representation |
 | [docs/adr/](docs/adr/) | Numbered decision records |
+
+Timezone and slot representation is the subtlest part of the domain; its
+reasoning is in [ADR 0004](docs/adr/0004-timezones-and-slots.md).
 
 ---
 
