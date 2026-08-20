@@ -73,8 +73,27 @@ fighting the parser.
 
 ### Bad
 
-- sqlc is another tool in the chain, with its own generation step to keep in
-  sync. Expected cost; revisit here if it proves sharper than anticipated.
+- sqlc has sharp edges, and two were hit while writing the first queries.
+
+  **Reusing a positional parameter with different types.** This reads well and
+  does not work:
+
+  ```sql
+  VALUES ($1, $2, $3, $3 + interval '30 minutes', 'booked')
+  ```
+
+  PostgreSQL cannot deduce a single type for `$3` when it appears both as a
+  bare value and inside interval arithmetic, and fails with
+  `SQLSTATE 42P08: inconsistent types deduced for parameter $3`.
+
+  **Casting to fix that loses the column name.** `$3::timestamptz` satisfies
+  PostgreSQL but makes sqlc name the generated field `Column3`, and switching to
+  a repeated named parameter (`@starts_at`) made sqlc's rewriting fail outright.
+
+  Both were resolved the same way: pass the values separately and let the
+  `appointments_duration_check` constraint verify they agree. That also moved
+  slot arithmetic into the domain, where it belongs.
+
 - `btree_gist` is required for the working-hours exclusion constraint. Standard
   contrib, available on Railway, but a PostgreSQL without it fails the first
   migration — loudly, at pre-deploy, which is the right place to find out.

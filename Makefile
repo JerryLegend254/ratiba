@@ -61,6 +61,20 @@ psql: ## Open a psql shell against the local database
 # Go
 # ---------------------------------------------------------------------------
 
+.PHONY: generate
+generate: ## Regenerate sqlc query code from db/queries and db/migrations
+	sqlc generate
+
+.PHONY: verify-generate
+verify-generate: ## Fail if committed generated code differs from a fresh run
+	sqlc generate
+	@if ! git diff --quiet -- internal/postgres/sqlcgen; then \
+		echo "ERROR: generated code is stale. Run 'make generate' and commit."; \
+		git --no-pager diff --stat -- internal/postgres/sqlcgen; \
+		exit 1; \
+	fi
+	@echo "==> Generated code is up to date"
+
 .PHONY: format
 format: ## Format all Go code
 	gofmt -w -s .
