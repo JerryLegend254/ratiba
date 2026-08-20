@@ -86,6 +86,28 @@ type Event struct {
 	Source string
 }
 
+// DoctorSummary is the subset of doctor detail returned alongside a patient's
+// appointments, so a client can render a list without a second round trip.
+type DoctorSummary struct {
+	ID        uuid.UUID
+	Slug      string
+	FullName  string
+	Specialty string
+	Timezone  string
+}
+
+// PatientAppointment is an appointment enriched with its doctor.
+type PatientAppointment struct {
+	Appointment Appointment
+	Doctor      DoctorSummary
+}
+
+// Page is a bounded offset window over a collection.
+type Page struct {
+	Limit  int32
+	Offset int32
+}
+
 // Repository-level sentinel errors.
 //
 // These are returned by the persistence adapter and translated into
