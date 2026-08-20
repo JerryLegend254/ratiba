@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/JerryLegend254/ratiba/internal/platform/apperror"
 	"github.com/JerryLegend254/ratiba/internal/platform/logging"
@@ -60,15 +63,26 @@ func sanitiseRequestID(raw string) string {
 	return value
 }
 
-// accessLog writes one structured line per completed request.
+// traceIDFrom returns the current trace ID, or "" when tracing is inactive.
+func traceIDFrom(ctx context.Context) string {
+	if spanCtx := trace.SpanContextFromContext(ctx); spanCtx.IsValid() {
+		return spanCtx.TraceID().String()
+	}
+	return ""
+}
+
+// observe records metrics, enriches the trace and writes the access log for
+// every completed request.
 //
 // It does its bookkeeping AFTER the inner handler returns, which is the only
 // point at which chi has resolved the route template. Logging the raw path
-// instead would put patient and appointment UUIDs into every log line and make
-// log cardinality unbounded.
-func (s *Server) accessLog(next http.Handler) http.Handler {
+// instead would put patient and appointment UUIDs into every log line and give
+// the metrics an unbounded label.
+func (s *Server) observe(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		s.metrics.IncInFlight()
+		defer s.metrics.DecInFlight()
 
 		recorder := &responseRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(recorder, r)
@@ -76,9 +90,27 @@ func (s *Server) accessLog(next http.Handler) http.Handler {
 		route := routeTemplate(r)
 		duration := time.Since(start)
 
+		s.metrics.ObserveRequest(r.Method, route, recorder.status, duration, recorder.written)
+
+		// Name the span after the matched route, for the same cardinality
+		// reason. otelhttp created it before routing, so it starts out named
+		// after the method alone.
+		if span := trace.SpanFromContext(r.Context()); span.IsRecording() {
+			span.SetName(r.Method + " " + route)
+			span.SetAttributes(
+				attribute.String("http.route", route),
+				attribute.Int("http.response.status_code", recorder.status),
+			)
+		}
+
+		// Health probes and metric scrapes arrive every few seconds. Logging
+		// them at info drowns real traffic; they are still counted in metrics.
 		level := slog.LevelInfo
-		if recorder.status >= http.StatusInternalServerError {
+		switch {
+		case recorder.status >= http.StatusInternalServerError:
 			level = slog.LevelError
+		case isProbePath(r.URL.Path):
+			level = slog.LevelDebug
 		}
 
 		s.logger.LogAttrs(r.Context(), level, "request completed",
@@ -133,6 +165,7 @@ func (s *Server) recoverPanic(next http.Handler) http.Handler {
 				panic(recovered)
 			}
 
+			s.metrics.RecordPanic()
 			s.logger.ErrorContext(r.Context(), "panic recovered in handler",
 				slog.String("event", "http.panic"),
 				slog.Any("panic", recovered),
@@ -192,6 +225,30 @@ func securityHeaders(next http.Handler) http.Handler {
 		header.Set("Cache-Control", "no-store")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// requireMetricsToken guards /metrics with a bearer token.
+//
+// Railway routes every path on a service to the public internet, so an
+// unauthenticated metrics endpoint would publish booking volumes and internal
+// timings to anyone who asked. When no token is configured (local development)
+// the guard is not installed at all; config.Load makes the token mandatory in
+// production.
+func (s *Server) requireMetricsToken(token string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			presented := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			// Constant-time comparison: a token check that returns early on the
+			// first wrong byte is measurably guessable.
+			if subtle.ConstantTimeCompare([]byte(presented), []byte(token)) != 1 {
+				w.Header().Set("WWW-Authenticate", `Bearer realm="metrics"`)
+				writeProblem(w, r, apperror.New(apperror.KindUnauthorized, apperror.CodeUnauthorized,
+					"A bearer token is required to read metrics."), s.logger)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // responseRecorder captures the status and byte count for the access log.

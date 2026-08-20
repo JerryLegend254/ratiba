@@ -1,5 +1,5 @@
 // Package logging builds Ratiba's structured logger and carries the correlation
-// identifier that makes a single request traceable end to end.
+// identifiers that make a single request traceable end to end.
 //
 // The central idea is that a support engineer holding one request ID from a
 // customer report can find every log line that request produced — including
@@ -16,6 +16,8 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/JerryLegend254/ratiba/internal/platform/config"
 )
@@ -82,16 +84,25 @@ func New(w io.Writer, cfg config.Config) *slog.Logger {
 	)
 }
 
-// contextHandler enriches every record with the correlation identifier held in
+// contextHandler enriches every record with the correlation identifiers held in
 // the context.
 type contextHandler struct {
 	slog.Handler
 }
 
-// Handle attaches the request identifier, then delegates.
+// Handle attaches request and trace identifiers, then delegates.
 func (h *contextHandler) Handle(ctx context.Context, record slog.Record) error {
 	if id := RequestIDFrom(ctx); id != "" {
 		record.AddAttrs(slog.String("request_id", id))
+	}
+	// When tracing is enabled the trace ID lets a log line be pivoted straight
+	// into the corresponding trace. When it is not, these attributes are simply
+	// absent.
+	if spanCtx := trace.SpanContextFromContext(ctx); spanCtx.IsValid() {
+		record.AddAttrs(
+			slog.String("trace_id", spanCtx.TraceID().String()),
+			slog.String("span_id", spanCtx.SpanID().String()),
+		)
 	}
 	return h.Handler.Handle(ctx, record)
 }

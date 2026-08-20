@@ -7,12 +7,15 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/JerryLegend254/ratiba/internal/appointment"
 	"github.com/JerryLegend254/ratiba/internal/doctor"
 	"github.com/JerryLegend254/ratiba/internal/patient"
 	"github.com/JerryLegend254/ratiba/internal/platform/apperror"
 	"github.com/JerryLegend254/ratiba/internal/platform/config"
+	"github.com/JerryLegend254/ratiba/internal/platform/observability"
 )
 
 // HealthChecker is the dependency /readyz probes.
@@ -31,6 +34,7 @@ type Server struct {
 	doctors      doctor.Repository
 	patients     patient.Repository
 	health       HealthChecker
+	metrics      *observability.Metrics
 	logger       *slog.Logger
 
 	build       config.BuildInfo
@@ -42,6 +46,8 @@ type Server struct {
 	maxPageSize      int32
 	handlerTimeout   time.Duration
 	readinessTimeout time.Duration
+
+	metricsToken string
 }
 
 // Dependencies are the collaborators NewServer requires.
@@ -50,6 +56,7 @@ type Dependencies struct {
 	Doctors      doctor.Repository
 	Patients     patient.Repository
 	Health       HealthChecker
+	Metrics      *observability.Metrics
 	Logger       *slog.Logger
 }
 
@@ -60,6 +67,7 @@ func NewServer(cfg config.Config, deps Dependencies) *Server {
 		doctors:          deps.Doctors,
 		patients:         deps.Patients,
 		health:           deps.Health,
+		metrics:          deps.Metrics,
 		logger:           deps.Logger,
 		build:            cfg.Build,
 		serviceName:      cfg.ServiceName,
@@ -69,6 +77,7 @@ func NewServer(cfg config.Config, deps Dependencies) *Server {
 		maxPageSize:      cfg.Booking.MaxPageSize,
 		handlerTimeout:   cfg.HTTP.HandlerTimeout,
 		readinessTimeout: readinessTimeoutDefault,
+		metricsToken:     cfg.Telemetry.MetricsToken,
 	}
 }
 
@@ -76,18 +85,19 @@ func NewServer(cfg config.Config, deps Dependencies) *Server {
 //
 // Middleware order, outermost first, and why:
 //
-//  1. requestID     — every later layer, including panic recovery, can log it.
-//  2. securityHeaders — cheap, and must apply even to error responses.
-//  3. accessLog     — wraps recovery so a panic is still logged as the 500 the
-//     client actually received.
-//  4. recoverPanic  — converts a panic into a problem response.
-//  5. timeout       — innermost, so the deadline covers only handler work.
-func (s *Server) Handler() http.Handler {
+//  1. otelhttp      — starts the server span so everything below is inside it.
+//  2. requestID     — every later layer, including panic recovery, can log it.
+//  3. securityHeaders — cheap, and must apply even to error responses.
+//  4. observe       — wraps recovery so a panic is still counted and logged as
+//     the 500 the client actually received.
+//  5. recoverPanic  — converts a panic into a problem response.
+//  6. timeout       — innermost, so the deadline covers only handler work.
+func (s *Server) Handler(metricsEnabled bool) http.Handler {
 	router := chi.NewRouter()
 
 	router.Use(requestID)
 	router.Use(securityHeaders)
-	router.Use(s.accessLog)
+	router.Use(s.observe)
 	router.Use(s.recoverPanic)
 	router.Use(s.timeout(s.handlerTimeout))
 
@@ -117,7 +127,32 @@ func (s *Server) Handler() http.Handler {
 	router.Get("/patients", s.handleListPatients)
 	router.Get("/patients/{patientID}", s.handleGetPatient)
 
-	return router
+	if metricsEnabled {
+		router.Group(func(protected chi.Router) {
+			if s.metricsToken != "" {
+				protected.Use(s.requireMetricsToken(s.metricsToken))
+			}
+			// Registered for GET only rather than with chi.Handle, which would
+			// bind every verb.
+			protected.Get("/metrics", promhttp.HandlerFor(
+				s.metrics.Registry(),
+				promhttp.HandlerOpts{
+					// Scrape failures must not become 500s in the API's own
+					// error budget; report them to the scraper instead.
+					ErrorHandling:     promhttp.ContinueOnError,
+					EnableOpenMetrics: true,
+				},
+			).ServeHTTP)
+		})
+	}
+
+	return otelhttp.NewHandler(router, "ratiba.api",
+		// Probes and scrapes would otherwise dominate trace volume without
+		// telling anyone anything.
+		otelhttp.WithFilter(func(r *http.Request) bool {
+			return !isProbePath(r.URL.Path)
+		}),
+	)
 }
 
 // isProbePath reports whether a path is infrastructure chatter rather than API

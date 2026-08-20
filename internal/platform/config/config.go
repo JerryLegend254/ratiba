@@ -61,10 +61,11 @@ type Config struct {
 	// environment.
 	Build BuildInfo
 
-	HTTP     HTTPConfig
-	Database DatabaseConfig
-	Logging  LoggingConfig
-	Booking  BookingConfig
+	HTTP      HTTPConfig
+	Database  DatabaseConfig
+	Logging   LoggingConfig
+	Telemetry TelemetryConfig
+	Booking   BookingConfig
 }
 
 // BuildInfo identifies the running binary. Injected with -ldflags; see the
@@ -135,6 +136,30 @@ type LoggingConfig struct {
 	Format string
 }
 
+// TelemetryConfig controls metrics and tracing.
+type TelemetryConfig struct {
+	MetricsEnabled bool
+	// MetricsToken, when set, requires a matching bearer token on /metrics.
+	// Required in production whenever metrics are enabled, because Railway
+	// exposes the whole service publicly.
+	MetricsToken string
+
+	TracingEnabled bool
+	// OTLPEndpoint is the collector's HTTP endpoint. Empty means "export
+	// nothing": tracing degrades to a no-op rather than failing startup.
+	OTLPEndpoint string
+	// OTLPInsecure sends over plain HTTP, appropriate for a collector on a
+	// private network.
+	OTLPInsecure bool
+	// TraceSampleRatio is the head sampling ratio in [0,1].
+	TraceSampleRatio float64
+
+	// PprofEnabled exposes Go runtime profiles on a SEPARATE listener. It is
+	// rejected outright in production.
+	PprofEnabled bool
+	PprofAddr    string
+}
+
 // BookingConfig carries the domain's tunables.
 //
 // Slot duration is deliberately absent. It is fixed at 30 minutes by a CHECK
@@ -196,6 +221,17 @@ func Load(build BuildInfo) (Config, error) {
 		Format: strings.ToLower(p.str("LOG_FORMAT", defaultLogFormat(cfg.Env))),
 	}
 
+	cfg.Telemetry = TelemetryConfig{
+		MetricsEnabled:   p.boolean("METRICS_ENABLED", true),
+		MetricsToken:     p.str("METRICS_AUTH_TOKEN", ""),
+		TracingEnabled:   p.boolean("OTEL_TRACES_ENABLED", false),
+		OTLPEndpoint:     p.str("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+		OTLPInsecure:     p.boolean("OTEL_EXPORTER_OTLP_INSECURE", true),
+		TraceSampleRatio: p.float("OTEL_TRACES_SAMPLER_ARG", 1.0),
+		PprofEnabled:     p.boolean("PPROF_ENABLED", false),
+		PprofAddr:        p.str("PPROF_ADDR", "127.0.0.1:6060"),
+	}
+
 	cfg.Booking = BookingConfig{
 		MinLeadTime:     p.duration("BOOKING_MIN_LEAD_TIME", time.Hour),
 		DefaultPageSize: p.int32Range("PAGE_SIZE_DEFAULT", 20, 1, 1000),
@@ -251,6 +287,15 @@ func validate(p *parser, cfg *Config) {
 		p.fail("LOG_FORMAT", `must be "json" or "text"`)
 	}
 
+	if cfg.Telemetry.TraceSampleRatio < 0 || cfg.Telemetry.TraceSampleRatio > 1 {
+		p.fail("OTEL_TRACES_SAMPLER_ARG", "must be between 0 and 1")
+	}
+	if cfg.Telemetry.TracingEnabled && cfg.Telemetry.OTLPEndpoint != "" {
+		if _, err := url.Parse(cfg.Telemetry.OTLPEndpoint); err != nil {
+			p.fail("OTEL_EXPORTER_OTLP_ENDPOINT", "must be a valid URL")
+		}
+	}
+
 	// A handler that outlives the write deadline can never deliver its own
 	// timeout response, so the client sees a dropped connection instead of a
 	// 503. Catch the misconfiguration rather than debug it in production.
@@ -259,6 +304,14 @@ func validate(p *parser, cfg *Config) {
 	}
 
 	if cfg.Env.IsProduction() {
+		if cfg.Telemetry.PprofEnabled {
+			p.fail("PPROF_ENABLED", "must be false in production; profiles expose internal state and are not authenticated")
+		}
+		if cfg.Telemetry.MetricsEnabled && cfg.Telemetry.MetricsToken == "" {
+			// The service is routed publicly by the platform, so an
+			// unauthenticated /metrics would be world-readable.
+			p.fail("METRICS_AUTH_TOKEN", "is required in production when METRICS_ENABLED is true, because the service is publicly routable")
+		}
 		if cfg.Logging.Format != "json" {
 			p.fail("LOG_FORMAT", `must be "json" in production so logs are machine parseable`)
 		}
@@ -285,6 +338,11 @@ func (c Config) LogValue() slog.Value {
 		slog.Int("db_min_conns", int(c.Database.MinConns)),
 		slog.String("log_level", c.Logging.Level.String()),
 		slog.String("log_format", c.Logging.Format),
+		slog.Bool("metrics_enabled", c.Telemetry.MetricsEnabled),
+		slog.Bool("metrics_protected", c.Telemetry.MetricsToken != ""),
+		slog.Bool("tracing_enabled", c.Telemetry.TracingEnabled),
+		slog.Bool("otlp_configured", c.Telemetry.OTLPEndpoint != ""),
+		slog.Bool("pprof_enabled", c.Telemetry.PprofEnabled),
 		slog.Duration("min_lead_time", c.Booking.MinLeadTime),
 	)
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/JerryLegend254/ratiba/internal/platform/clock"
 	"github.com/JerryLegend254/ratiba/internal/platform/config"
 	"github.com/JerryLegend254/ratiba/internal/platform/logging"
+	"github.com/JerryLegend254/ratiba/internal/platform/observability"
 	"github.com/JerryLegend254/ratiba/internal/testsupport"
 	transporthttp "github.com/JerryLegend254/ratiba/internal/transport/http"
 )
@@ -57,12 +58,13 @@ func newHarness(t *testing.T) *harness {
 		Doctors:      store.Doctors(),
 		Patients:     store.Patients(),
 		Health:       store,
+		Metrics:      observability.NewMetrics(cfg),
 		Logger:       logging.Discard(),
 	})
 
 	return &harness{
 		server:  server,
-		handler: server.Handler(),
+		handler: server.Handler(true),
 		store:   store,
 		clock:   clk,
 	}
@@ -683,6 +685,28 @@ func TestOperationalEndpoints(t *testing.T) {
 		// must never echo the driver error.
 		if strings.Contains(recorder.Body.String(), "secret") || strings.Contains(recorder.Body.String(), "postgres://") {
 			t.Fatalf("the readiness response leaked internal detail: %s", recorder.Body.String())
+		}
+	})
+
+	t.Run("metrics are exposed when unprotected", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+
+		h.do(t, http.MethodPost, "/appointments", bookBody(t, 9, 0), nil)
+
+		recorder := h.do(t, http.MethodGet, "/metrics", "", nil)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", recorder.Code)
+		}
+		body := recorder.Body.String()
+		for _, want := range []string{"http_requests_total", "http_request_duration_seconds", "ratiba_build_info"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("expected the %s metric to be exposed", want)
+			}
+		}
+		// The route label must be the template, never the raw path with IDs.
+		if strings.Contains(body, testsupport.NairobiDoctorID.String()) {
+			t.Error("metrics must not contain identifiers; route labels would be unbounded")
 		}
 	})
 

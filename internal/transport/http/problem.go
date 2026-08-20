@@ -30,8 +30,8 @@ const ProblemContentType = "application/problem+json"
 //
 //   - Code is a stable machine-readable identifier. Clients branch on this, not
 //     on Title or Detail, both of which may be reworded.
-//   - RequestID lets a user paste an error straight into a support ticket, and
-//     lets an engineer find the exact logs for it.
+//   - RequestID and TraceID let a user paste an error straight into a support
+//     ticket, and let an engineer find the exact logs and trace for it.
 type Problem struct {
 	// Type is a URI reference identifying the problem kind. Ratiba serves a
 	// description of each at GET /problems/{code}.
@@ -49,6 +49,8 @@ type Problem struct {
 	Code string `json:"code"`
 	// RequestID correlates with the X-Request-Id response header and the logs.
 	RequestID string `json:"request_id,omitempty"`
+	// TraceID correlates with the distributed trace, when tracing is enabled.
+	TraceID string `json:"trace_id,omitempty"`
 	// Violations lists field-level problems, when the error has them.
 	Violations []apperror.FieldViolation `json:"violations,omitempty"`
 }
@@ -114,6 +116,7 @@ func writeProblem(w http.ResponseWriter, r *http.Request, err error, logger *slo
 		Instance:   r.URL.Path,
 		Code:       appErr.Code,
 		RequestID:  logging.RequestIDFrom(r.Context()),
+		TraceID:    traceIDFrom(r.Context()),
 		Violations: appErr.Violations,
 	}
 

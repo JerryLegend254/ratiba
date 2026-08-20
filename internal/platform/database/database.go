@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/exaring/otelpgx"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/JerryLegend254/ratiba/internal/platform/config"
@@ -23,6 +24,8 @@ type Options struct {
 	// ApplicationName appears in pg_stat_activity, which is how an operator
 	// tells Ratiba's connections apart from a migration job or a psql session.
 	ApplicationName string
+	// EnableTracing installs the OpenTelemetry query tracer.
+	EnableTracing bool
 }
 
 // NewPool builds and verifies a connection pool.
@@ -58,6 +61,14 @@ func NewPool(ctx context.Context, cfg config.DatabaseConfig, opts Options, logge
 	// than let a connection be held indefinitely.
 	poolConfig.ConnConfig.RuntimeParams["statement_timeout"] =
 		strconv.FormatInt(cfg.StatementTimeout.Milliseconds(), 10)
+
+	if opts.EnableTracing {
+		poolConfig.ConnConfig.Tracer = otelpgx.NewTracer(
+			otelpgx.WithTrimSQLInSpanName(),
+			// Query arguments would carry patient identifiers into traces.
+			otelpgx.WithDisableQuerySpanNamePrefix(),
+		)
+	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {

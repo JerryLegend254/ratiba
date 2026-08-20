@@ -27,7 +27,9 @@ func setEnv(t *testing.T, values map[string]string) {
 		"HTTP_IDLE_TIMEOUT", "HTTP_HANDLER_TIMEOUT", "HTTP_SHUTDOWN_TIMEOUT",
 		"HTTP_MAX_BODY_BYTES", "DB_MAX_CONNS", "DB_MIN_CONNS", "DB_MAX_CONN_LIFETIME",
 		"DB_MAX_CONN_IDLE_TIME", "DB_CONNECT_TIMEOUT", "DB_STATEMENT_TIMEOUT",
-		"LOG_LEVEL", "LOG_FORMAT",
+		"LOG_LEVEL", "LOG_FORMAT", "METRICS_ENABLED", "METRICS_AUTH_TOKEN",
+		"OTEL_TRACES_ENABLED", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_INSECURE",
+		"OTEL_TRACES_SAMPLER_ARG", "PPROF_ENABLED", "PPROF_ADDR",
 		"BOOKING_MIN_LEAD_TIME", "PAGE_SIZE_DEFAULT", "PAGE_SIZE_MAX",
 	} {
 		t.Setenv(key, "")
@@ -53,6 +55,12 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.Booking.MinLeadTime != time.Hour {
 		t.Errorf("expected a one hour lead time, got %s", cfg.Booking.MinLeadTime)
+	}
+	if cfg.Telemetry.PprofEnabled {
+		t.Error("pprof must be disabled by default")
+	}
+	if cfg.Telemetry.TracingEnabled {
+		t.Error("tracing must be opt-in")
 	}
 	// Local development gets readable logs; deployed environments do not.
 	if cfg.Logging.Format != "text" {
@@ -100,9 +108,10 @@ func TestLoadReportsEveryProblemAtOnce(t *testing.T) {
 func TestProductionSafetyRules(t *testing.T) {
 	base := func() map[string]string {
 		return map[string]string{
-			"APP_ENV":      "production",
-			"DATABASE_URL": validDatabaseURL,
-			"LOG_FORMAT":   "json",
+			"APP_ENV":            "production",
+			"DATABASE_URL":       validDatabaseURL,
+			"LOG_FORMAT":         "json",
+			"METRICS_AUTH_TOKEN": "a-production-metrics-token",
 		}
 	}
 
@@ -118,6 +127,16 @@ func TestProductionSafetyRules(t *testing.T) {
 		mutate  func(map[string]string)
 		wantKey string
 	}{
+		{
+			name:    "pprof must not be enabled",
+			mutate:  func(env map[string]string) { env["PPROF_ENABLED"] = "true" },
+			wantKey: "PPROF_ENABLED",
+		},
+		{
+			name:    "metrics must be protected",
+			mutate:  func(env map[string]string) { delete(env, "METRICS_AUTH_TOKEN") },
+			wantKey: "METRICS_AUTH_TOKEN",
+		},
 		{
 			name:    "logs must be machine parseable",
 			mutate:  func(env map[string]string) { env["LOG_FORMAT"] = "text" },
@@ -145,6 +164,17 @@ func TestProductionSafetyRules(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("metrics may be unprotected if they are also disabled", func(t *testing.T) {
+		env := base()
+		delete(env, "METRICS_AUTH_TOKEN")
+		env["METRICS_ENABLED"] = "false"
+		setEnv(t, env)
+
+		if _, err := config.Load(config.BuildInfo{}); err != nil {
+			t.Fatalf("expected this to be allowed, got %v", err)
+		}
+	})
 }
 
 func TestRejectsUnsafeValues(t *testing.T) {
@@ -178,6 +208,11 @@ func TestRejectsUnsafeValues(t *testing.T) {
 			// The timeout response could never be written.
 			env:     map[string]string{"HTTP_HANDLER_TIMEOUT": "30s", "HTTP_WRITE_TIMEOUT": "20s"},
 			wantKey: "HTTP_HANDLER_TIMEOUT",
+		},
+		{
+			name:    "trace sample ratio out of range",
+			env:     map[string]string{"OTEL_TRACES_SAMPLER_ARG": "1.5"},
+			wantKey: "OTEL_TRACES_SAMPLER_ARG",
 		},
 		{
 			name:    "unknown environment",
@@ -222,9 +257,11 @@ func TestRejectsUnsafeValues(t *testing.T) {
 // database password must not reach a log aggregator.
 func TestSecretsAreNeverLogged(t *testing.T) {
 	const password = "sup3r-s3cret-passw0rd"
+	const token = "sup3r-s3cret-metrics-token"
 
 	setEnv(t, map[string]string{
-		"DATABASE_URL": "postgres://ratiba:" + password + "@db.internal:5432/ratiba",
+		"DATABASE_URL":       "postgres://ratiba:" + password + "@db.internal:5432/ratiba",
+		"METRICS_AUTH_TOKEN": token,
 	})
 
 	cfg, err := config.Load(config.BuildInfo{Version: "v1", Commit: "abc"})
@@ -251,8 +288,11 @@ func TestSecretsAreNeverLogged(t *testing.T) {
 		if strings.Contains(output, password) {
 			t.Errorf("the log line leaked the database password: %s", output)
 		}
+		if strings.Contains(output, token) {
+			t.Errorf("the log line leaked the metrics token: %s", output)
+		}
 		// It should still carry the operational facts worth having.
-		for _, expected := range []string{"db.internal", "http_port"} {
+		for _, expected := range []string{"db.internal", "metrics_protected", "http_port"} {
 			if !strings.Contains(output, expected) {
 				t.Errorf("expected the log line to include %q, got: %s", expected, output)
 			}
