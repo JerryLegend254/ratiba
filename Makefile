@@ -14,7 +14,11 @@ CONTAINER         ?= ratiba-postgres
 DATABASE_URL ?= postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:$(POSTGRES_PORT)/$(POSTGRES_DB)?sslmode=disable
 
 # Exported so the migrate binary and, later, the API can read them.
+TEST_DATABASE_URL ?= postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:$(POSTGRES_PORT)/$(POSTGRES_DB)_test?sslmode=disable
+
+# Exported so the migrate binary and, later, the API can read them.
 export DATABASE_URL
+export TEST_DATABASE_URL
 export PGPASSWORD = $(POSTGRES_PASSWORD)
 
 .PHONY: help
@@ -100,6 +104,17 @@ format-check: ## Fail if any Go file is not gofmt-clean
 vet: ## Run go vet
 	go vet ./...
 
-.PHONY: test
-test: ## Run the test suite with the race detector
+.PHONY: test-db
+test-db: ## Create the integration test database if it does not exist
+	@bash scripts/create-test-db.sh
+
+.PHONY: unit-test
+unit-test: ## Run unit tests with the race detector (no database needed)
 	go test -race -count=1 ./...
+
+.PHONY: integration-test
+integration-test: test-db ## Run integration tests against real PostgreSQL
+	go test -tags=integration -race -count=1 ./internal/postgres/...
+
+.PHONY: test
+test: unit-test integration-test ## Run every test suite

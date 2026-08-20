@@ -147,18 +147,28 @@ serialisation failures to retry, and a retry loop, for no additional guarantee.
   immediately, until the holding transaction commits or rolls back. Transactions
   here are short, so the wait is negligible.
 
-## How this will be verified
+## Verification
 
-Nothing above is proven yet. The claim is falsifiable, and these are the tests
-that must exist before it may be stated as fact:
+No longer a claim. These run against real PostgreSQL with `-race`:
 
-- Two concurrent bookings for one slot produce exactly one success, one
-  conflict, and **one row in the database**.
-- Many concurrent bookings for one slot produce exactly one winner.
-- Concurrent bookings for *different* slots all succeed — an over-broad lock
-  would pass every test above while serialising the whole clinic.
-- A failed reschedule leaves the appointment at its original time.
-- The constraint name maps to the right domain error, so renaming it in a
-  migration fails loudly rather than degrading a 409 into a 500.
+| Test | What it proves |
+|---|---|
+| `TestExactlyTwoConcurrentBookingsForTheSameSlot` | Two simultaneous requests → one `201`, one `409`, **one row** |
+| `TestManyConcurrentBookingsForTheSameSlot` | 24 simultaneous → exactly one winner |
+| `TestConcurrentBookingsForDifferentSlotsAllSucceed` | Unrelated slots are not serialised |
+| `TestConcurrentCancellations` | The row lock serialises cancellations |
+| `TestConcurrentReschedulesOntoOneSlot` | One winner; every loser keeps its original slot |
+| `TestRescheduleAtomicity` | A failed move leaves the appointment untouched |
+| `TestTransactionRollback` | A failed transaction leaves no appointment and no audit event |
+| `TestConstraintTranslation` | `23505` on the named constraint → `ErrSlotTaken` |
+| `TestDatabaseEnforcesInvariants` | The constraints hold against direct SQL, bypassing the application |
 
-They run against real PostgreSQL. An in-memory double cannot prove any of this.
+Each concurrency test uses a `sync.WaitGroup` as a starting gate, so the
+goroutines genuinely overlap. Without it they start staggered, the writes mostly
+do not race, and the test passes while proving nothing.
+
+`TestConcurrentBookingsForDifferentSlotsAllSucceed` is the inverse guard, and
+the reason it exists: an over-broad lock — say `SELECT ... FOR UPDATE` on the
+doctor row — would pass every double-booking test above while quietly
+serialising the entire clinic. Only a test asserting that unrelated bookings
+succeed *concurrently* catches that.
