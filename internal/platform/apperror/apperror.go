@@ -33,6 +33,16 @@ const (
 	// KindConflict means the request collides with current state: a taken
 	// slot, an already-cancelled appointment.
 	KindConflict Kind = "conflict"
+	// KindUnsupportedMedia means the request body's content type is not
+	// accepted.
+	KindUnsupportedMedia Kind = "unsupported_media_type"
+	// KindPayloadTooLarge means the request body exceeded the configured limit.
+	KindPayloadTooLarge Kind = "payload_too_large"
+	// KindUnauthorized means a credential was missing or wrong.
+	KindUnauthorized Kind = "unauthorized"
+	// KindUnavailable means a dependency is down, or the request ran out of
+	// time.
+	KindUnavailable Kind = "unavailable"
 	// KindInternal is the catch-all. Its Message is never derived from the
 	// underlying cause.
 	KindInternal Kind = "internal"
@@ -122,6 +132,18 @@ const (
 	CodeInternalError    = "internal_error"
 	CodeNotFound         = "not_found"
 	CodeValidationFailed = "validation_failed"
+
+	// Transport-level rejections.
+	CodeMalformedJSON        = "malformed_json"
+	CodeUnknownField         = "unknown_field"
+	CodeTrailingContent      = "trailing_content"
+	CodeUnsupportedMediaType = "unsupported_media_type"
+	CodePayloadTooLarge      = "payload_too_large"
+	CodeInvalidPathParameter = "invalid_path_parameter"
+	CodeInvalidQueryParam    = "invalid_query_parameter"
+	CodeMethodNotAllowed     = "method_not_allowed"
+	CodeUnauthorized         = "unauthorized"
+	CodeRequestTimeout       = "request_timeout"
 
 	CodeDoctorNotFound      = "doctor_not_found"
 	CodePatientNotFound     = "patient_not_found"
