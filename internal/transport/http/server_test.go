@@ -13,6 +13,7 @@ import (
 	"github.com/JerryLegend254/ratiba/internal/platform/apperror"
 	"github.com/JerryLegend254/ratiba/internal/platform/clock"
 	"github.com/JerryLegend254/ratiba/internal/platform/config"
+	"github.com/JerryLegend254/ratiba/internal/platform/httpserver"
 	"github.com/JerryLegend254/ratiba/internal/platform/logging"
 	"github.com/JerryLegend254/ratiba/internal/platform/observability"
 	"github.com/JerryLegend254/ratiba/internal/testsupport"
@@ -28,10 +29,11 @@ import (
 const maxTestBodyBytes = 4096
 
 type harness struct {
-	server  *transporthttp.Server
-	handler http.Handler
-	store   *testsupport.MemoryStore
-	clock   *clock.Fixed
+	server    *transporthttp.Server
+	handler   http.Handler
+	store     *testsupport.MemoryStore
+	clock     *clock.Fixed
+	readiness *httpserver.ReadinessGate
 }
 
 func newHarness(t *testing.T) *harness {
@@ -53,20 +55,25 @@ func newHarness(t *testing.T) *harness {
 		Booking:     config.BookingConfig{DefaultPageSize: 20, MaxPageSize: 100},
 	}
 
+	readiness := httpserver.NewReadinessGate()
+	readiness.Open()
+
 	server := transporthttp.NewServer(cfg, transporthttp.Dependencies{
 		Appointments: service,
 		Doctors:      store.Doctors(),
 		Patients:     store.Patients(),
 		Health:       store,
+		Readiness:    readiness,
 		Metrics:      observability.NewMetrics(cfg),
 		Logger:       logging.Discard(),
 	})
 
 	return &harness{
-		server:  server,
-		handler: server.Handler(true),
-		store:   store,
-		clock:   clk,
+		server:    server,
+		handler:   server.Handler(true),
+		store:     store,
+		clock:     clk,
+		readiness: readiness,
 	}
 }
 
@@ -688,6 +695,20 @@ func TestOperationalEndpoints(t *testing.T) {
 		}
 	})
 
+	t.Run("readyz reports 503 while draining", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.readiness.Close()
+
+		recorder := h.do(t, http.MethodGet, "/readyz", "", nil)
+		if recorder.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected 503 during shutdown, got %d", recorder.Code)
+		}
+		if !strings.Contains(recorder.Body.String(), "draining") {
+			t.Errorf("expected the body to say it is draining, got %s", recorder.Body.String())
+		}
+	})
+
 	t.Run("metrics are exposed when unprotected", func(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
@@ -850,4 +871,14 @@ func TestRequestIDHandling(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestCORSIsDisabledByDefault(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+
+	recorder := h.do(t, http.MethodGet, "/livez", "", map[string]string{"Origin": "https://evil.example"})
+	if got := recorder.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("CORS must be off unless configured, got Allow-Origin %q", got)
+	}
 }

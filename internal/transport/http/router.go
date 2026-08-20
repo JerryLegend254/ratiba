@@ -15,6 +15,7 @@ import (
 	"github.com/JerryLegend254/ratiba/internal/patient"
 	"github.com/JerryLegend254/ratiba/internal/platform/apperror"
 	"github.com/JerryLegend254/ratiba/internal/platform/config"
+	"github.com/JerryLegend254/ratiba/internal/platform/httpserver"
 	"github.com/JerryLegend254/ratiba/internal/platform/observability"
 )
 
@@ -34,6 +35,7 @@ type Server struct {
 	doctors      doctor.Repository
 	patients     patient.Repository
 	health       HealthChecker
+	readiness    *httpserver.ReadinessGate
 	metrics      *observability.Metrics
 	logger       *slog.Logger
 
@@ -47,6 +49,7 @@ type Server struct {
 	handlerTimeout   time.Duration
 	readinessTimeout time.Duration
 
+	corsOrigins  []string
 	metricsToken string
 }
 
@@ -56,6 +59,7 @@ type Dependencies struct {
 	Doctors      doctor.Repository
 	Patients     patient.Repository
 	Health       HealthChecker
+	Readiness    *httpserver.ReadinessGate
 	Metrics      *observability.Metrics
 	Logger       *slog.Logger
 }
@@ -67,6 +71,7 @@ func NewServer(cfg config.Config, deps Dependencies) *Server {
 		doctors:          deps.Doctors,
 		patients:         deps.Patients,
 		health:           deps.Health,
+		readiness:        deps.Readiness,
 		metrics:          deps.Metrics,
 		logger:           deps.Logger,
 		build:            cfg.Build,
@@ -77,6 +82,7 @@ func NewServer(cfg config.Config, deps Dependencies) *Server {
 		maxPageSize:      cfg.Booking.MaxPageSize,
 		handlerTimeout:   cfg.HTTP.HandlerTimeout,
 		readinessTimeout: readinessTimeoutDefault,
+		corsOrigins:      cfg.Security.CORSAllowedOrigins,
 		metricsToken:     cfg.Telemetry.MetricsToken,
 	}
 }
@@ -87,7 +93,7 @@ func NewServer(cfg config.Config, deps Dependencies) *Server {
 //
 //  1. otelhttp      — starts the server span so everything below is inside it.
 //  2. requestID     — every later layer, including panic recovery, can log it.
-//  3. securityHeaders — cheap, and must apply even to error responses.
+//  3. securityHeaders / cors — cheap, and must apply even to error responses.
 //  4. observe       — wraps recovery so a panic is still counted and logged as
 //     the 500 the client actually received.
 //  5. recoverPanic  — converts a panic into a problem response.
@@ -97,6 +103,9 @@ func (s *Server) Handler(metricsEnabled bool) http.Handler {
 
 	router.Use(requestID)
 	router.Use(securityHeaders)
+	if len(s.corsOrigins) > 0 {
+		router.Use(cors(s.corsOrigins))
+	}
 	router.Use(s.observe)
 	router.Use(s.recoverPanic)
 	router.Use(s.timeout(s.handlerTimeout))

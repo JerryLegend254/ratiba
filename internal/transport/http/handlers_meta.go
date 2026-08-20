@@ -31,7 +31,9 @@ func (s *Server) handleLivez(w http.ResponseWriter, r *http.Request) {
 //
 // Readiness answers "should traffic be routed here right now?", so it does
 // verify the database — with a short timeout of its own, because a readiness
-// probe that hangs is worse than one that fails.
+// probe that hangs is worse than one that fails. It reports 503 during graceful
+// shutdown so the platform stops sending new requests before the listener
+// closes.
 //
 // The response names each dependency and whether it is reachable. It never
 // includes the connection string, the driver error, or anything else that would
@@ -39,6 +41,13 @@ func (s *Server) handleLivez(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	checks := map[string]string{}
 	ready := true
+
+	if !s.readiness.IsOpen() {
+		checks["accepting_traffic"] = "draining"
+		ready = false
+	} else {
+		checks["accepting_traffic"] = "ok"
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), s.readinessTimeout)
 	defer cancel()

@@ -66,6 +66,7 @@ type Config struct {
 	Logging   LoggingConfig
 	Telemetry TelemetryConfig
 	Booking   BookingConfig
+	Security  SecurityConfig
 }
 
 // BuildInfo identifies the running binary. Injected with -ldflags; see the
@@ -174,6 +175,16 @@ type BookingConfig struct {
 	MaxPageSize     int32
 }
 
+// SecurityConfig carries transport-level protections.
+type SecurityConfig struct {
+	// CORSAllowedOrigins is empty by default, which disables CORS entirely.
+	// A wildcard is rejected by the loader.
+	CORSAllowedOrigins []string
+	// TrustProxyHeaders enables reading X-Forwarded-For for client IP. Only
+	// safe behind a trusted proxy such as Railway's edge.
+	TrustProxyHeaders bool
+}
+
 // Load reads, defaults and validates configuration from the process
 // environment.
 //
@@ -236,6 +247,11 @@ func Load(build BuildInfo) (Config, error) {
 		MinLeadTime:     p.duration("BOOKING_MIN_LEAD_TIME", time.Hour),
 		DefaultPageSize: p.int32Range("PAGE_SIZE_DEFAULT", 20, 1, 1000),
 		MaxPageSize:     p.int32Range("PAGE_SIZE_MAX", 100, 1, 1000),
+	}
+
+	cfg.Security = SecurityConfig{
+		CORSAllowedOrigins: p.csv("CORS_ALLOWED_ORIGINS"),
+		TrustProxyHeaders:  p.boolean("TRUST_PROXY_HEADERS", true),
 	}
 
 	validate(p, &cfg)
@@ -303,6 +319,17 @@ func validate(p *parser, cfg *Config) {
 		p.fail("HTTP_HANDLER_TIMEOUT", "must be shorter than HTTP_WRITE_TIMEOUT so the timeout response can be written")
 	}
 
+	for _, origin := range cfg.Security.CORSAllowedOrigins {
+		if origin == "*" {
+			p.fail("CORS_ALLOWED_ORIGINS", `must not contain "*"; list explicit origins instead`)
+			continue
+		}
+		parsed, err := url.Parse(origin)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			p.fail("CORS_ALLOWED_ORIGINS", fmt.Sprintf("%q is not a valid scheme://host origin", origin))
+		}
+	}
+
 	if cfg.Env.IsProduction() {
 		if cfg.Telemetry.PprofEnabled {
 			p.fail("PPROF_ENABLED", "must be false in production; profiles expose internal state and are not authenticated")
@@ -344,6 +371,7 @@ func (c Config) LogValue() slog.Value {
 		slog.Bool("otlp_configured", c.Telemetry.OTLPEndpoint != ""),
 		slog.Bool("pprof_enabled", c.Telemetry.PprofEnabled),
 		slog.Duration("min_lead_time", c.Booking.MinLeadTime),
+		slog.Int("cors_allowed_origins", len(c.Security.CORSAllowedOrigins)),
 	)
 }
 

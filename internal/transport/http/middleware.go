@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"time"
 
@@ -225,6 +226,37 @@ func securityHeaders(next http.Handler) http.Handler {
 		header.Set("Cache-Control", "no-store")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// cors applies a strict allowlist, and is only installed when origins are
+// configured.
+//
+// Credentials are never allowed, and the wildcard origin is rejected at
+// configuration load, so the "wildcard origin with credentials" mistake is
+// impossible to make here.
+func cors(allowedOrigins []string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := r.Header.Get("Origin")
+			if origin != "" && slices.Contains(allowedOrigins, origin) {
+				header := w.Header()
+				header.Set("Access-Control-Allow-Origin", origin)
+				header.Set("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+				header.Set("Access-Control-Allow-Headers", "Content-Type, Idempotency-Key, X-Request-Id")
+				header.Set("Access-Control-Expose-Headers", "X-Request-Id, Idempotency-Replayed, Location")
+				header.Set("Access-Control-Max-Age", "600")
+				// The response varies by Origin, so a shared cache must not
+				// reuse one origin's response for another.
+				header.Add("Vary", "Origin")
+			}
+
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // requireMetricsToken guards /metrics with a bearer token.

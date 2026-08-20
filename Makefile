@@ -111,6 +111,17 @@ vet: ## Run go vet, including build-tagged files
 test-db: ## Create the integration test database if it does not exist
 	@bash scripts/create-test-db.sh
 
+.PHONY: run
+run: ## Run the API against the local database
+	go run ./cmd/api
+
+.PHONY: build
+build: ## Compile both binaries into ./bin
+	@mkdir -p bin
+	go build -trimpath -o bin/ratiba-api ./cmd/api
+	go build -trimpath -o bin/ratiba-migrate ./cmd/migrate
+	@echo "==> Built bin/ratiba-api and bin/ratiba-migrate"
+
 .PHONY: unit-test
 unit-test: ## Run unit tests with the race detector (no database needed)
 	go test -race -count=1 ./...
