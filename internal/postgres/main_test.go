@@ -16,7 +16,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log/slog"
 	"net/url"
 	"os"
 	"testing"
@@ -31,6 +30,7 @@ import (
 	"github.com/JerryLegend254/ratiba/internal/appointment"
 	"github.com/JerryLegend254/ratiba/internal/doctor"
 	"github.com/JerryLegend254/ratiba/internal/platform/clock"
+	"github.com/JerryLegend254/ratiba/internal/platform/logging"
 	"github.com/JerryLegend254/ratiba/internal/postgres"
 )
 
@@ -158,7 +158,7 @@ func newFixture(t *testing.T) *fixture {
 
 	service, err := appointment.NewService(
 		store.Appointments(), store.Doctors(), store.Patients(),
-		clk, slog.New(slog.DiscardHandler), appointment.NopMetrics{},
+		clk, logging.Discard(), appointment.NopMetrics{},
 		appointment.ServiceConfig{
 			Policy:          appointment.DefaultPolicy(),
 			DefaultPageSize: 20,

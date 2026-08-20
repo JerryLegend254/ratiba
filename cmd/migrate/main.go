@@ -29,6 +29,7 @@ import (
 	"github.com/pressly/goose/v3"
 
 	"github.com/JerryLegend254/ratiba/db"
+	"github.com/JerryLegend254/ratiba/internal/platform/config"
 )
 
 const migrationsDir = "migrations"
@@ -82,9 +83,9 @@ func run() error {
 		return errors.New("a command is required")
 	}
 
-	databaseURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
-	if databaseURL == "" {
-		return errors.New("DATABASE_URL is required")
+	databaseURL, err := config.DatabaseURLFromEnv()
+	if err != nil {
+		return err
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))

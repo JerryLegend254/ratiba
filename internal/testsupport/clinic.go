@@ -11,6 +11,7 @@ import (
 	"github.com/JerryLegend254/ratiba/internal/doctor"
 	"github.com/JerryLegend254/ratiba/internal/patient"
 	"github.com/JerryLegend254/ratiba/internal/platform/clock"
+	"github.com/JerryLegend254/ratiba/internal/platform/logging"
 )
 
 // Fixed identities used across the test suite.
@@ -107,7 +108,7 @@ func NewService(store *MemoryStore, clk clock.Clock) (*appointment.Service, erro
 		store.Doctors(),
 		store.Patients(),
 		clk,
-		slog.New(slog.DiscardHandler),
+		logging.Discard(),
 		appointment.NopMetrics{},
 		appointment.ServiceConfig{
 			Policy:          appointment.DefaultPolicy(),
@@ -127,7 +128,7 @@ func NewFixedClock() *clock.Fixed {
 }
 
 // Logger returns a silent logger for tests that do not assert on log output.
-func Logger() *slog.Logger { return slog.New(slog.DiscardHandler) }
+func Logger() *slog.Logger { return logging.Discard() }
 
 // MustLocation loads an IANA zone or panics. Only for test setup, where a
 // missing zone database is a broken environment rather than a runtime error.

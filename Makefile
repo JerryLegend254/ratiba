@@ -101,8 +101,11 @@ format-check: ## Fail if any Go file is not gofmt-clean
 	@echo "==> All files are formatted"
 
 .PHONY: vet
-vet: ## Run go vet
+vet: ## Run go vet, including build-tagged files
 	go vet ./...
+	@# Integration files are behind a build tag, so the default vet run does not
+	@# see them. An unused import there only surfaces when the suite is run.
+	go vet -tags=integration ./...
 
 .PHONY: test-db
 test-db: ## Create the integration test database if it does not exist
