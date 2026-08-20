@@ -84,7 +84,9 @@ func (s *Server) handleServiceInfo(w http.ResponseWriter, r *http.Request) {
 		Commit:      s.build.Commit,
 		Environment: s.environment,
 		Docs: map[string]string{
-			"errors": "/problems",
+			"interactive": "/docs",
+			"openapi":     "/openapi.yaml",
+			"errors":      "/problems",
 		},
 		Endpoints: []string{
 			"POST   /appointments",
@@ -99,7 +101,6 @@ func (s *Server) handleServiceInfo(w http.ResponseWriter, r *http.Request) {
 			"GET    /patients/{id}/appointments",
 			"GET    /livez",
 			"GET    /readyz",
-			"GET    /problems",
 		},
 	}, s.logger)
 }

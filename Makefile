@@ -130,5 +130,9 @@ unit-test: ## Run unit tests with the race detector (no database needed)
 integration-test: test-db ## Run integration tests against real PostgreSQL
 	go test -tags=integration -race -count=1 ./internal/postgres/...
 
+.PHONY: verify-openapi
+verify-openapi: ## Validate the OpenAPI contract and check it matches the routes
+	go test -run 'TestOpenAPI' -count=1 ./internal/transport/http/...
+
 .PHONY: test
 test: unit-test integration-test ## Run every test suite

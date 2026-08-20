@@ -1,0 +1,1189 @@
+openapi: 3.1.0
+
+info:
+  title: Ratiba Clinic Appointment API
+  version: "1.0.0"
+  summary: Book, reschedule and cancel 30-minute clinic appointments.
+  description: |
+    Ratiba ("schedule" in Swahili) is a clinic appointment booking API.
+
+    ## Core rules
+
+    - Every appointment is exactly **30 minutes**, occupying the half-open
+      interval `[starts_at, ends_at)`.
+    - A slot start must be one the doctor's schedule actually generates. In
+      practice that means `:00` or `:30` in the **doctor's** timezone, inside a
+      working-hours interval, with the whole appointment fitting before the
+      interval ends.
+    - A booking must start at least **one hour** from now
+      (`starts_at >= now + 1h`). The same rule filters the availability list and
+      validates reschedule destinations.
+    - A doctor can have at most one **active** appointment per start time. This
+      is enforced by a partial unique index in PostgreSQL, so concurrent
+      requests for the same slot cannot both succeed.
+    - Cancelling releases the slot immediately and retains the record for audit.
+
+    ## Timezones
+
+    Instants on the wire are RFC 3339 in UTC. Calendar dates
+    (`GET /doctors/{doctorId}/availability?date=`) are interpreted in the
+    doctor's IANA timezone, which is returned with the response. `starts_at` on
+    a booking request may carry any offset; it identifies an instant.
+
+    ## Errors
+
+    Every error is an RFC 9457 problem document with `application/problem+json`.
+    Branch on the stable `code` field, not on `title` or `detail`. The full
+    catalogue is served at `GET /problems`.
+
+    ## Authentication
+
+    There is none. This is a deliberate, documented scope decision for the
+    assessment, not an oversight; it will get its own decision record and threat
+    model. Only `GET /metrics` is credential-protected.
+
+  contact:
+    name: Ratiba API
+    url: https://github.com/JerryLegend254/ratiba
+  license:
+    name: MIT
+    identifier: MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+tags:
+  - name: Appointments
+    description: Booking, cancelling and rescheduling.
+  - name: Availability
+    description: Which slots a doctor has free.
+  - name: Directory
+    description: Doctors and patients. Not part of the core brief; present so the API is usable without database access.
+  - name: Operations
+    description: Health, metrics and documentation endpoints.
+
+paths:
+  /appointments:
+    post:
+      tags: [Appointments]
+      summary: Book a slot
+      operationId: bookAppointment
+      description: |
+        Books a 30-minute appointment.
+
+        Validation order is deterministic: temporal rules first (`slot_in_past`,
+        then `slot_too_soon`), then structural rules
+        (`doctor_not_working_on_date`, `slot_not_aligned`,
+        `slot_outside_working_hours`). Availability is checked last, by the
+        database, and returns `slot_unavailable`.
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BookAppointmentRequest'
+            examples:
+              standard:
+                summary: Book a morning slot
+                value:
+                  doctor_id: 7f3c0a1e-1111-4a10-9c01-000000000001
+                  patient_id: 9b2d5e40-2222-4b20-8d02-000000000001
+                  starts_at: "2026-09-01T06:00:00Z"
+      responses:
+        '201':
+          description: Appointment created.
+          headers:
+            Location:
+              description: Path of the created appointment.
+              schema: { type: string }
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Appointment'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: |
+            The referenced doctor or patient does not exist.
+            Codes: `doctor_not_found`, `patient_not_found`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                doctorNotFound:
+                  value:
+                    type: /problems/doctor_not_found
+                    title: Not Found
+                    status: 404
+                    detail: No doctor exists with that identifier.
+                    instance: /appointments
+                    code: doctor_not_found
+                    request_id: 018f4e0a1c2b7d3e9f012a3b4c5d6e7f
+        '409':
+          description: 'Another active appointment already holds that slot. Code: `slot_unavailable`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                slotTaken:
+                  value:
+                    type: /problems/slot_unavailable
+                    title: Conflict
+                    status: 409
+                    detail: That slot is no longer available.
+                    instance: /appointments
+                    code: slot_unavailable
+                    request_id: 018f4e0a1c2b7d3e9f012a3b4c5d6e7f
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          description: |
+            The request was understood but breaks a booking rule. Codes:
+            `validation_failed`, `slot_in_past`, `slot_too_soon`,
+            `doctor_not_working_on_date`, `slot_not_aligned`,
+            `slot_outside_working_hours`, `doctor_inactive`, `patient_inactive`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                tooSoon:
+                  value:
+                    type: /problems/slot_too_soon
+                    title: Unprocessable Entity
+                    status: 422
+                    detail: Appointments must start at least 1 hour from now.
+                    instance: /appointments
+                    code: slot_too_soon
+                    request_id: 018f4e0a1c2b7d3e9f012a3b4c5d6e7f
+                notAligned:
+                  value:
+                    type: /problems/slot_not_aligned
+                    title: Unprocessable Entity
+                    status: 422
+                    detail: Appointments must start on a 30 minutes boundary within the doctor's working hours.
+                    instance: /appointments
+                    code: slot_not_aligned
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /appointments/{appointmentId}:
+    get:
+      tags: [Appointments]
+      summary: Fetch an appointment
+      operationId: getAppointment
+      description: Returns the appointment in any status, including cancelled.
+      parameters:
+        - $ref: '#/components/parameters/AppointmentId'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: The appointment.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Appointment'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/AppointmentNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /appointments/{appointmentId}/cancel:
+    patch:
+      tags: [Appointments]
+      summary: Cancel an appointment
+      operationId: cancelAppointment
+      description: |
+        Cancels an active appointment and releases its slot immediately. A
+        reason is mandatory and is never written to logs, metrics or traces.
+
+        Cancelling an already-cancelled appointment returns `409`, so a retry
+        cannot silently overwrite the original reason and timestamp.
+      parameters:
+        - $ref: '#/components/parameters/AppointmentId'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelAppointmentRequest'
+            examples:
+              standard:
+                value:
+                  reason: Patient is travelling that week.
+      responses:
+        '200':
+          description: The cancelled appointment.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Appointment'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/AppointmentNotFound'
+        '409':
+          description: 'The appointment is already cancelled. Code: `appointment_already_cancelled`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                alreadyCancelled:
+                  value:
+                    type: /problems/appointment_already_cancelled
+                    title: Conflict
+                    status: 409
+                    detail: This appointment has already been cancelled.
+                    code: appointment_already_cancelled
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          description: 'The reason is blank or too long. Code: `validation_failed`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                blankReason:
+                  value:
+                    type: /problems/validation_failed
+                    title: Unprocessable Entity
+                    status: 422
+                    detail: A cancellation reason is required.
+                    code: validation_failed
+                    violations:
+                      - field: reason
+                        code: required
+                        message: Provide a non-empty cancellation reason.
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /appointments/{appointmentId}/reschedule:
+    patch:
+      tags: [Appointments]
+      summary: Move an appointment to a new slot
+      operationId: rescheduleAppointment
+      description: |
+        Atomically moves an active appointment.
+
+        The destination is validated with exactly the rules a fresh booking
+        uses. The move is a single database statement inside one transaction, so
+        the old slot is released and the new one claimed together. If the
+        destination turns out to be taken, the whole transaction rolls back and
+        the appointment keeps its original time — it is never left slotless.
+
+        Rescheduling to the slot the appointment already occupies returns `409`
+        `reschedule_same_slot` rather than succeeding as a no-op, because a
+        success would append a `rescheduled` audit event describing a move that
+        never happened.
+      parameters:
+        - $ref: '#/components/parameters/AppointmentId'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RescheduleAppointmentRequest'
+            examples:
+              standard:
+                value:
+                  starts_at: "2026-09-01T07:30:00Z"
+      responses:
+        '200':
+          description: The moved appointment.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Appointment'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/AppointmentNotFound'
+        '409':
+          description: |
+            The destination is taken, the appointment is cancelled, or the
+            destination is the current slot. Codes: `slot_unavailable`,
+            `appointment_already_cancelled`, `reschedule_same_slot`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                sameSlot:
+                  value:
+                    type: /problems/reschedule_same_slot
+                    title: Conflict
+                    status: 409
+                    detail: The appointment is already booked at that time.
+                    code: reschedule_same_slot
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          description: |
+            The destination breaks a booking rule. Codes: `validation_failed`,
+            `slot_in_past`, `slot_too_soon`, `doctor_not_working_on_date`,
+            `slot_not_aligned`, `slot_outside_working_hours`, `doctor_inactive`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /doctors/{doctorId}/availability:
+    get:
+      tags: [Availability]
+      summary: List a doctor's free slots on a date
+      operationId: getDoctorAvailability
+      description: |
+        Returns the slots a patient can book right now on the given local
+        calendar date, in the doctor's timezone.
+
+        Excluded from the result: slots already held by an active appointment,
+        slots inside the one-hour lead-time window, and any time not covered by
+        a working-hours interval.
+
+        The result is advisory. A listed slot can be taken a millisecond later;
+        `POST /appointments` is the only authority.
+      parameters:
+        - $ref: '#/components/parameters/DoctorId'
+        - name: date
+          in: query
+          required: true
+          description: Local calendar date in the doctor's timezone.
+          schema:
+            type: string
+            format: date
+            pattern: '^\d{4}-\d{2}-\d{2}$'
+          example: "2026-09-01"
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Free slots, ordered by start time. An empty list is a valid answer.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Availability'
+        '400':
+          description: |
+            The doctor ID or the date is malformed or missing. Codes:
+            `invalid_path_parameter`, `invalid_query_parameter`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          $ref: '#/components/responses/DoctorNotFound'
+        '422':
+          description: 'The doctor is not accepting appointments. Code: `doctor_inactive`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /patients/{patientId}/appointments:
+    get:
+      tags: [Appointments]
+      summary: List a patient's upcoming appointments
+      operationId: listPatientAppointments
+      description: |
+        Returns future **active** appointments only, ordered by `starts_at`
+        ascending with `id` as a tie-breaker so paging is stable.
+
+        Cancelled and past appointments are excluded: this endpoint answers
+        "what do I still need to show up for?".
+
+        Paging is offset-based and bounded; `limit` above the maximum is
+        rejected rather than silently clamped.
+      parameters:
+        - $ref: '#/components/parameters/PatientId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: One page of upcoming appointments.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PatientAppointmentPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/PatientNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /doctors:
+    get:
+      tags: [Directory]
+      summary: List doctors
+      operationId: listDoctors
+      parameters:
+        - name: active_only
+          in: query
+          required: false
+          description: Return only doctors currently accepting appointments.
+          schema: { type: boolean, default: true }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: One page of doctors.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DoctorPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /doctors/{doctorId}:
+    get:
+      tags: [Directory]
+      summary: Fetch a doctor
+      operationId: getDoctor
+      parameters:
+        - $ref: '#/components/parameters/DoctorId'
+      responses:
+        '200':
+          description: The doctor.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Doctor'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/DoctorNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /patients:
+    get:
+      tags: [Directory]
+      summary: List patients
+      operationId: listPatients
+      description: |
+        Present so a reviewer can find a patient ID without opening the
+        database. In a system holding real patient data this endpoint would
+        require authorisation; see `docs/security.md`.
+      parameters:
+        - name: active_only
+          in: query
+          required: false
+          schema: { type: boolean, default: true }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: One page of patients.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PatientPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /patients/{patientId}:
+    get:
+      tags: [Directory]
+      summary: Fetch a patient
+      operationId: getPatient
+      parameters:
+        - $ref: '#/components/parameters/PatientId'
+      responses:
+        '200':
+          description: The patient.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Patient'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/PatientNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /livez:
+    get:
+      tags: [Operations]
+      summary: Liveness probe
+      operationId: livez
+      description: |
+        Reports only that the process is running and can serve a handler. It
+        deliberately does not touch the database: a liveness probe that fails
+        during a database incident would restart every replica and turn a
+        degraded service into no service.
+      responses:
+        '200':
+          description: The process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+  /readyz:
+    get:
+      tags: [Operations]
+      summary: Readiness probe
+      operationId: readyz
+      description: |
+        Reports whether traffic should be routed here. Verifies database
+        connectivity with a short timeout, and reports `503` while the process
+        is draining after SIGTERM. Never discloses connection strings or driver
+        errors.
+      responses:
+        '200':
+          description: Ready to serve traffic.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        '503':
+          description: Not ready — draining, or a dependency is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+  /metrics:
+    get:
+      tags: [Operations]
+      summary: Prometheus metrics
+      operationId: metrics
+      description: |
+        Prometheus text exposition. Protected by a bearer token whenever
+        `METRICS_AUTH_TOKEN` is set; the token is mandatory in production
+        because Railway routes every path publicly.
+      security:
+        - metricsToken: []
+      responses:
+        '200':
+          description: Metrics in Prometheus text format.
+          content:
+            text/plain:
+              schema: { type: string }
+        '401':
+          description: Missing or incorrect bearer token.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /openapi.yaml:
+    get:
+      tags: [Operations]
+      summary: This document
+      operationId: openapiSpec
+      description: |
+        The contract itself, embedded in the binary. A deployed service always
+        serves the schema it was built from, so the two cannot drift.
+      responses:
+        '200':
+          description: The OpenAPI 3.1 document.
+          content:
+            application/yaml:
+              schema: { type: string }
+
+  /docs:
+    get:
+      tags: [Operations]
+      summary: Interactive API reference
+      operationId: docs
+      description: |
+        A Swagger UI page rendering this document. The UI assets load from a
+        pinned CDN, so the page needs outbound network access from the browser;
+        `GET /openapi.yaml` always works without it.
+      responses:
+        '200':
+          description: An HTML documentation page.
+          content:
+            text/html:
+              schema: { type: string }
+
+  /problems:
+    get:
+      tags: [Operations]
+      summary: Error code catalogue
+      operationId: listProblems
+      description: Every error code this API can return, with its meaning.
+      responses:
+        '200':
+          description: The catalogue.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ProblemDescription'
+
+  /problems/{code}:
+    get:
+      tags: [Operations]
+      summary: Describe one error code
+      operationId: getProblem
+      description: Resolves the `type` URI carried by every error response.
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema: { type: string }
+          example: slot_unavailable
+      responses:
+        '200':
+          description: The description.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDescription'
+        '404':
+          description: No such error code.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /:
+    get:
+      tags: [Operations]
+      summary: Service information
+      operationId: serviceInfo
+      description: Build metadata, documentation links and the endpoint list.
+      responses:
+        '200':
+          description: Service information.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceInfo'
+
+components:
+  securitySchemes:
+    metricsToken:
+      type: http
+      scheme: bearer
+      description: Bearer token guarding GET /metrics only. No other endpoint is authenticated.
+
+  headers:
+    XRequestId:
+      description: |
+        Correlation identifier, echoed from the request when it is a safe short
+        token and generated otherwise. Quote it in any support request; it
+        appears on every log line for this request.
+      schema: { type: string }
+
+  parameters:
+    AppointmentId:
+      name: appointmentId
+      in: path
+      required: true
+      description: Appointment UUID.
+      schema:
+        type: string
+        format: uuid
+      example: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+
+    DoctorId:
+      name: doctorId
+      in: path
+      required: true
+      description: Doctor UUID.
+      schema:
+        type: string
+        format: uuid
+      example: 7f3c0a1e-1111-4a10-9c01-000000000001
+
+    PatientId:
+      name: patientId
+      in: path
+      required: true
+      description: Patient UUID.
+      schema:
+        type: string
+        format: uuid
+      example: 9b2d5e40-2222-4b20-8d02-000000000001
+
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Page size. Values above the maximum are rejected, not clamped.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+    Offset:
+      name: offset
+      in: query
+      required: false
+      description: Number of records to skip.
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+
+    RequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: |
+        Optional correlation identifier. Accepted when it is at most 64
+        characters of `[A-Za-z0-9._-]`; otherwise a fresh one is generated.
+        Always echoed in the response.
+      schema:
+        type: string
+        maxLength: 64
+        pattern: '^[A-Za-z0-9._-]+$'
+
+  responses:
+    BadRequest:
+      description: |
+        The request could not be understood. Codes: `malformed_json`,
+        `unknown_field`, `trailing_content`, `invalid_path_parameter`,
+        `invalid_query_parameter`.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            unknownField:
+              value:
+                type: /problems/unknown_field
+                title: Bad Request
+                status: 400
+                detail: The request body contains a field this endpoint does not accept.
+                code: unknown_field
+                violations:
+                  - field: start_at
+                    code: unknown
+                    message: Remove this field.
+
+    UnsupportedMediaType:
+      description: 'Content-Type is not application/json. Code: `unsupported_media_type`.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+    PayloadTooLarge:
+      description: 'The request body exceeded the configured limit. Code: `payload_too_large`.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+    AppointmentNotFound:
+      description: 'No such appointment. Code: `appointment_not_found`.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+    DoctorNotFound:
+      description: 'No such doctor. Code: `doctor_not_found`.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+    PatientNotFound:
+      description: 'No such patient. Code: `patient_not_found`.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+    InternalError:
+      description: |
+        An unexpected condition. The body never contains internal error text;
+        use `request_id` to find the corresponding logs. Code: `internal_error`.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+    Unavailable:
+      description: |
+        A dependency is unavailable, the request exceeded its time budget, or
+        the replica is draining. Codes: `dependency_unavailable`,
+        `request_timeout`, `service_shutting_down`.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+  schemas:
+    BookAppointmentRequest:
+      type: object
+      additionalProperties: false
+      required: [doctor_id, patient_id, starts_at]
+      properties:
+        doctor_id:
+          type: string
+          format: uuid
+          description: The doctor to book with.
+        patient_id:
+          type: string
+          format: uuid
+          description: The patient the appointment is for.
+        starts_at:
+          type: string
+          format: date-time
+          description: |
+            Slot start as an RFC 3339 instant. An offset is mandatory — a naive
+            timestamp would have to be guessed against some timezone, and every
+            guess silently books the wrong hour when it is wrong.
+          examples: ["2026-09-01T06:00:00Z", "2026-09-01T09:00:00+03:00"]
+
+    CancelAppointmentRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: |
+            Why the appointment is being cancelled. Required. Stored on the
+            record and never written to logs, metrics or traces.
+
+    RescheduleAppointmentRequest:
+      type: object
+      additionalProperties: false
+      required: [starts_at]
+      properties:
+        starts_at:
+          type: string
+          format: date-time
+          description: The new slot start, validated exactly as a fresh booking.
+
+    Appointment:
+      type: object
+      required:
+        [id, doctor_id, patient_id, starts_at, ends_at, status,
+         cancellation_reason, cancelled_at, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        doctor_id: { type: string, format: uuid }
+        patient_id: { type: string, format: uuid }
+        starts_at:
+          type: string
+          format: date-time
+          description: Inclusive start, UTC.
+        ends_at:
+          type: string
+          format: date-time
+          description: Exclusive end, UTC. Always exactly 30 minutes after the start.
+        status:
+          type: string
+          enum: [booked, cancelled]
+        cancellation_reason:
+          type: [string, 'null']
+          maxLength: 500
+        cancelled_at:
+          type: [string, 'null']
+          format: date-time
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+      examples:
+        - id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+          doctor_id: 7f3c0a1e-1111-4a10-9c01-000000000001
+          patient_id: 9b2d5e40-2222-4b20-8d02-000000000001
+          starts_at: "2026-09-01T06:00:00Z"
+          ends_at: "2026-09-01T06:30:00Z"
+          status: booked
+          cancellation_reason: null
+          cancelled_at: null
+          created_at: "2026-08-19T10:00:00Z"
+          updated_at: "2026-08-19T10:00:00Z"
+
+    PatientAppointment:
+      allOf:
+        - $ref: '#/components/schemas/Appointment'
+        - type: object
+          required: [doctor, starts_at_local]
+          properties:
+            doctor:
+              $ref: '#/components/schemas/DoctorSummary'
+            starts_at_local:
+              type: string
+              description: The same instant rendered in the doctor's timezone, offset included.
+              example: "2026-09-01T09:00:00+03:00"
+
+    DoctorSummary:
+      type: object
+      required: [id, slug, full_name, specialty, timezone]
+      properties:
+        id: { type: string, format: uuid }
+        slug:
+          type: string
+          description: Stable lowercase handle, useful in scripts and smoke tests.
+          example: amina-wanjiru
+        full_name: { type: string }
+        specialty: { type: string }
+        timezone:
+          type: string
+          description: IANA zone name. The authority for this doctor's working hours and calendar dates.
+          example: Africa/Nairobi
+
+    Doctor:
+      allOf:
+        - $ref: '#/components/schemas/DoctorSummary'
+        - type: object
+          required: [is_active, created_at, updated_at]
+          properties:
+            is_active:
+              type: boolean
+              description: When false, the doctor has no availability and cannot be booked.
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+
+    Patient:
+      type: object
+      required: [id, full_name, email, is_active, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        full_name: { type: string }
+        email: { type: string, format: email }
+        is_active:
+          type: boolean
+          description: When false, new bookings are refused; existing appointments stay readable.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Slot:
+      type: object
+      required: [starts_at, ends_at, starts_at_local]
+      properties:
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        starts_at_local:
+          type: string
+          description: The start rendered in the doctor's timezone.
+          example: "2026-09-01T09:00:00+03:00"
+
+    Availability:
+      type: object
+      required: [doctor, date, timezone, slot_duration_minutes, min_lead_time_minutes, slots]
+      properties:
+        doctor:
+          $ref: '#/components/schemas/DoctorSummary'
+        date:
+          type: string
+          format: date
+          description: The local calendar date the slots belong to.
+        timezone:
+          type: string
+          description: The IANA zone the date was interpreted in.
+        slot_duration_minutes:
+          type: integer
+          example: 30
+        min_lead_time_minutes:
+          type: integer
+          description: Slots starting sooner than this are omitted.
+          example: 60
+        slots:
+          type: array
+          items:
+            $ref: '#/components/schemas/Slot'
+      examples:
+        - doctor:
+            id: 7f3c0a1e-1111-4a10-9c01-000000000001
+            slug: amina-wanjiru
+            full_name: Dr. Amina Wanjiru
+            specialty: General Practice
+            timezone: Africa/Nairobi
+          date: "2026-09-01"
+          timezone: Africa/Nairobi
+          slot_duration_minutes: 30
+          min_lead_time_minutes: 60
+          slots:
+            - starts_at: "2026-09-01T06:00:00Z"
+              ends_at: "2026-09-01T06:30:00Z"
+              starts_at_local: "2026-09-01T09:00:00+03:00"
+
+    Pagination:
+      type: object
+      required: [limit, offset, total, has_more]
+      properties:
+        limit: { type: integer }
+        offset: { type: integer }
+        total:
+          type: integer
+          format: int64
+          description: Total matching records, ignoring paging.
+        has_more:
+          type: boolean
+          description: Whether another page exists after this one.
+
+    PatientAppointmentPage:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/PatientAppointment'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    DoctorPage:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Doctor'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    PatientPage:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Patient'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    Problem:
+      type: object
+      description: An RFC 9457 problem details document.
+      required: [type, title, status, detail, code]
+      properties:
+        type:
+          type: string
+          description: URI reference identifying the problem kind. Resolves at GET /problems/{code}.
+          example: /problems/slot_unavailable
+        title:
+          type: string
+          description: Short human-readable summary. May be reworded; do not branch on it.
+        status:
+          type: integer
+          description: The HTTP status code, repeated per RFC 9457.
+        detail:
+          type: string
+          description: Explanation of this occurrence. Never contains internal error text or SQL.
+        instance:
+          type: string
+          description: The request path.
+        code:
+          type: string
+          description: Stable machine-readable code. This is the field to branch on.
+        request_id:
+          type: string
+          description: Matches the X-Request-Id response header and the server logs.
+        trace_id:
+          type: string
+          description: Present when distributed tracing is enabled.
+        violations:
+          type: array
+          description: Field-level detail, when the error has any.
+          items:
+            $ref: '#/components/schemas/FieldViolation'
+
+    FieldViolation:
+      type: object
+      required: [field, code, message]
+      properties:
+        field:
+          type: string
+          description: Dotted path into the request body, or a parameter name.
+        code:
+          type: string
+          description: Stable reason code, for example `required` or `too_long`.
+        message:
+          type: string
+
+    ProblemDescription:
+      type: object
+      required: [code, status, title, meaning]
+      properties:
+        code: { type: string }
+        status: { type: integer }
+        title: { type: string }
+        meaning:
+          type: string
+          description: When the code is returned and what to do about it.
+
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, ready, not_ready]
+        checks:
+          type: object
+          description: Dependency name to status. Never contains credentials or internals.
+          additionalProperties:
+            type: string
+        version: { type: string }
+        commit: { type: string }
+
+    ServiceInfo:
+      type: object
+      required: [service, version, commit, environment, docs, endpoints]
+      properties:
+        service: { type: string }
+        version: { type: string }
+        commit: { type: string }
+        environment: { type: string }
+        docs:
+          type: object
+          additionalProperties: { type: string }
+        endpoints:
+          type: array
+          items: { type: string }

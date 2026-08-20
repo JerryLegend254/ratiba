@@ -22,6 +22,7 @@ import (
 	// binary runs — including a minimal container with no /usr/share/zoneinfo.
 	_ "time/tzdata"
 
+	"github.com/JerryLegend254/ratiba/api"
 	"github.com/JerryLegend254/ratiba/internal/appointment"
 	"github.com/JerryLegend254/ratiba/internal/platform/clock"
 	"github.com/JerryLegend254/ratiba/internal/platform/config"
@@ -121,6 +122,7 @@ func run() error {
 		Readiness:    readiness,
 		Metrics:      metrics,
 		Logger:       logger,
+		OpenAPISpec:  api.OpenAPISpec,
 	})
 
 	server := httpserver.New(

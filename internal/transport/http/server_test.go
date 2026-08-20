@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JerryLegend254/ratiba/api"
 	"github.com/JerryLegend254/ratiba/internal/platform/apperror"
 	"github.com/JerryLegend254/ratiba/internal/platform/clock"
 	"github.com/JerryLegend254/ratiba/internal/platform/config"
@@ -66,6 +67,7 @@ func newHarness(t *testing.T) *harness {
 		Readiness:    readiness,
 		Metrics:      observability.NewMetrics(cfg),
 		Logger:       logging.Discard(),
+		OpenAPISpec:  api.OpenAPISpec,
 	})
 
 	return &harness{
@@ -728,6 +730,24 @@ func TestOperationalEndpoints(t *testing.T) {
 		// The route label must be the template, never the raw path with IDs.
 		if strings.Contains(body, testsupport.NairobiDoctorID.String()) {
 			t.Error("metrics must not contain identifiers; route labels would be unbounded")
+		}
+	})
+
+	t.Run("the OpenAPI document and docs page are served", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+
+		spec := h.do(t, http.MethodGet, "/openapi.yaml", "", nil)
+		if spec.Code != http.StatusOK {
+			t.Fatalf("expected the spec to be served, got %d", spec.Code)
+		}
+		if !strings.Contains(spec.Body.String(), "openapi: 3.1.0") {
+			t.Error("the served document does not look like the OpenAPI contract")
+		}
+
+		docs := h.do(t, http.MethodGet, "/docs", "", nil)
+		if docs.Code != http.StatusOK {
+			t.Fatalf("expected the docs page to be served, got %d", docs.Code)
 		}
 	})
 
