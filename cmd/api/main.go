@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -17,9 +18,10 @@ import (
 	"syscall"
 	"time"
 
-	// The zone database is compiled into the binary rather than read from the
-	// host, so a doctor's IANA timezone resolves identically everywhere the
-	// binary runs — including a minimal container with no /usr/share/zoneinfo.
+	// The zone database is compiled into the binary. The production image is
+	// distroless and has no /usr/share/zoneinfo, so without this every doctor's
+	// IANA timezone would fail to load and no booking could be validated. This
+	// single import is what makes the container work.
 	_ "time/tzdata"
 
 	"github.com/JerryLegend254/ratiba/api"
@@ -43,6 +45,16 @@ var (
 )
 
 func main() {
+	// A container health check, not a server start. Handled before anything
+	// else so it needs no configuration and touches no dependencies.
+	healthcheck := flag.Bool("healthcheck", false,
+		"probe this container's own /livez endpoint and exit 0 (healthy) or 1")
+	flag.Parse()
+
+	if *healthcheck {
+		os.Exit(runHealthcheck())
+	}
+
 	if err := run(); err != nil {
 		// Startup failures happen before the logger exists, or after it has
 		// been shut down. stderr is the only thing guaranteed to work.

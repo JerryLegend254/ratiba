@@ -8,9 +8,6 @@ POSTGRES_USER     ?= ratiba
 POSTGRES_PASSWORD ?= ratiba_local_dev
 POSTGRES_DB       ?= ratiba
 POSTGRES_PORT     ?= 5432
-POSTGRES_IMAGE    ?= postgres:17.5-alpine
-CONTAINER         ?= ratiba-postgres
-
 DATABASE_URL ?= postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:$(POSTGRES_PORT)/$(POSTGRES_DB)?sslmode=disable
 
 # Exported so the migrate binary and, later, the API can read them.
@@ -28,24 +25,42 @@ help: ## Show this help
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
+.PHONY: up
+up: ## Build and start postgres, run migrations and seed, start the API
+	docker compose up --build -d
+
+.PHONY: down
+down: ## Stop the stack, keeping the database volume
+	docker compose down
+
+.PHONY: clean
+clean: ## Stop the stack, delete the database volume and build output
+	docker compose down --volumes --remove-orphans
+	rm -rf bin coverage.out coverage.html
+
+.PHONY: logs
+logs: ## Follow the API logs
+	docker compose logs -f api
+
 .PHONY: db-start
-db-start: ## Start a local PostgreSQL container
-	@docker rm -f $(CONTAINER) >/dev/null 2>&1 || true
-	docker run -d --name $(CONTAINER) \
-		-e POSTGRES_USER=$(POSTGRES_USER) \
-		-e POSTGRES_PASSWORD=$(POSTGRES_PASSWORD) \
-		-e POSTGRES_DB=$(POSTGRES_DB) \
-		-p $(POSTGRES_PORT):5432 $(POSTGRES_IMAGE)
-	@echo "==> Waiting for PostgreSQL"
+db-start: ## Start only PostgreSQL, for running the API natively
+	docker compose up -d postgres
 	@for i in $$(seq 1 40); do \
-		docker exec $(CONTAINER) pg_isready -U $(POSTGRES_USER) -d $(POSTGRES_DB) >/dev/null 2>&1 && break; \
+		docker compose exec -T postgres pg_isready -U $(POSTGRES_USER) -d $(POSTGRES_DB) >/dev/null 2>&1 && break; \
 		sleep 1; \
 	done
-	@echo "==> Ready on port $(POSTGRES_PORT)"
+	@echo "==> PostgreSQL ready on port $(POSTGRES_PORT)"
 
 .PHONY: db-stop
-db-stop: ## Stop and remove the local PostgreSQL container
-	docker rm -f $(CONTAINER)
+db-stop: ## Stop PostgreSQL
+	docker compose stop postgres
+
+.PHONY: observability
+observability: ## Start the optional OTel + Prometheus + Grafana + Tempo stack
+	OTEL_TRACES_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318 \
+		docker compose --profile observability up --build -d
+	@echo "  Grafana     http://localhost:3000  (anonymous admin)"
+	@echo "  Prometheus  http://localhost:9090"
 
 .PHONY: migrate-up
 migrate-up: ## Apply all pending migrations
@@ -65,7 +80,7 @@ seed: ## Insert or refresh the deterministic demo dataset (safe to re-run)
 
 .PHONY: psql
 psql: ## Open a psql shell against the local database
-	psql "$(DATABASE_URL)"
+	docker compose exec postgres psql -U $(POSTGRES_USER) -d $(POSTGRES_DB)
 
 # ---------------------------------------------------------------------------
 # Go
@@ -114,6 +129,16 @@ test-db: ## Create the integration test database if it does not exist
 .PHONY: run
 run: ## Run the API against the local database
 	go run ./cmd/api
+
+.PHONY: docker-build
+docker-build: ## Build the production image
+	docker build -t ratiba:latest .
+
+.PHONY: verify-compose
+verify-compose: ## Validate the compose file and the observability profile
+	docker compose config --quiet
+	docker compose --profile observability config --quiet
+	@echo "==> compose.yaml is valid"
 
 .PHONY: build
 build: ## Compile both binaries into ./bin

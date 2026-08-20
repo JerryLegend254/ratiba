@@ -20,11 +20,11 @@ export PGPASSWORD="$POSTGRES_PASSWORD"
 if command -v psql >/dev/null 2>&1 && \
    psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d postgres -c 'SELECT 1' >/dev/null 2>&1; then
   run_sql() { psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d postgres -tAc "$1"; }
-elif docker exec "${POSTGRES_CONTAINER:-ratiba-postgres}" pg_isready -U "$POSTGRES_USER" >/dev/null 2>&1; then
-  run_sql() { docker exec -i "${POSTGRES_CONTAINER:-ratiba-postgres}" psql -U "$POSTGRES_USER" -d postgres -tAc "$1"; }
+elif docker compose ps postgres --status running --quiet >/dev/null 2>&1; then
+  run_sql() { docker compose exec -T postgres psql -U "$POSTGRES_USER" -d postgres -tAc "$1"; }
 else
   echo "ERROR: cannot reach PostgreSQL at ${POSTGRES_HOST}:${POSTGRES_PORT}."
-  echo "Start it first:  make db-start"
+  echo "Start it first:  make up      (or: docker compose up -d postgres)"
   exit 1
 fi
 

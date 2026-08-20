@@ -1,0 +1,167 @@
+# Local development stack for Ratiba.
+#
+#   cp .env.example .env
+#   docker compose up --build
+#   curl http://localhost:8080/readyz
+#
+# Migrations and seeding run as a one-shot `migrate` service that must finish
+# successfully before the API starts. That mirrors the deployed topology, where
+# Railway runs the migrator as a pre-deploy step rather than letting every API
+# replica race to migrate on startup.
+
+name: ratiba
+
+services:
+  postgres:
+    image: postgres:17.5-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ratiba}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ratiba_local_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-ratiba}
+      # Faster and safer for a throwaway local database; never for production.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    ports:
+      # Published so integration tests and psql can reach it from the host.
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # -U and -d matter: the default `pg_isready` reports ready during the
+      # init-script phase, before the application database actually exists.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ratiba} -d ${POSTGRES_DB:-ratiba}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-local}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    # Same image, different binary.
+    entrypoint: ["/usr/local/bin/ratiba-migrate"]
+    command: ["up"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-ratiba}:${POSTGRES_PASSWORD:-ratiba_local_dev}@postgres:5432/${POSTGRES_DB:-ratiba}?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  seed:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    entrypoint: ["/usr/local/bin/ratiba-migrate"]
+    command: ["seed"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-ratiba}:${POSTGRES_PASSWORD:-ratiba_local_dev}@postgres:5432/${POSTGRES_DB:-ratiba}?sslmode=disable
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-local}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      PORT: 8080
+      # Credentials are composed from environment variables here and are never
+      # baked into the image.
+      DATABASE_URL: postgres://${POSTGRES_USER:-ratiba}:${POSTGRES_PASSWORD:-ratiba_local_dev}@postgres:5432/${POSTGRES_DB:-ratiba}?sslmode=disable
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      BOOKING_MIN_LEAD_TIME: ${BOOKING_MIN_LEAD_TIME:-1h}
+      DB_MAX_CONNS: ${DB_MAX_CONNS:-10}
+      # Tracing is off unless the observability profile supplies a collector.
+      OTEL_TRACES_ENABLED: ${OTEL_TRACES_ENABLED:-false}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+    healthcheck:
+      # The image has no shell and no curl, so the health check reuses the API
+      # binary's own probe subcommand rather than adding tooling to a
+      # distroless image purely to check it is alive.
+      test: ["CMD", "/usr/local/bin/ratiba-api", "-healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Optional observability stack: `docker compose --profile observability up`.
+  # Kept behind a profile so the everyday `docker compose up` stays fast.
+  # ---------------------------------------------------------------------------
+  otel-collector:
+    profiles: [observability]
+    image: otel/opentelemetry-collector-contrib:0.115.1
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./deploy/observability/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4318:4318" # OTLP/HTTP, which is what the API exports to
+    depends_on:
+      - tempo
+
+  tempo:
+    profiles: [observability]
+    image: grafana/tempo:2.6.1
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./deploy/observability/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+
+  prometheus:
+    profiles: [observability]
+    image: prom/prometheus:v3.1.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+
+  grafana:
+    profiles: [observability]
+    image: grafana/grafana:11.4.0
+    environment:
+      # Local-only convenience: anonymous admin access so the dashboards are
+      # usable immediately with no login step.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_FEATURE_TOGGLES_ENABLE: traceqlEditor
+    volumes:
+      # Datasources are provisioned from files, so the stack is useful without
+      # any clicking.
+      - ./deploy/observability/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - tempo
+
+volumes:
+  postgres-data:
+  prometheus-data:
+  tempo-data:

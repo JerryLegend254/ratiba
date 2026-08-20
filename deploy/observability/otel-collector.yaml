@@ -1,0 +1,41 @@
+# OpenTelemetry Collector configuration for the local observability profile.
+#
+# The API exports OTLP over HTTP to this collector, which forwards traces to
+# Tempo. Nothing here is production configuration; it exists so a developer can
+# see a real trace of a booking without standing up a vendor account.
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Bound memory so a burst of spans cannot take the collector down and, with
+  # it, the developer's whole compose stack.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  batch:
+    timeout: 2s
+    send_batch_size: 512
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+  # Useful when debugging the pipeline itself: `docker compose logs otel-collector`.
+  debug:
+    verbosity: basic
+
+service:
+  telemetry:
+    logs:
+      level: warn
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/tempo, debug]
