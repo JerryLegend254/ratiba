@@ -191,6 +191,66 @@ func TestConcurrentBookingsForDifferentSlotsAllSucceed(t *testing.T) {
 	}
 }
 
+// TestConcurrentIdempotentRetries covers the client that fires a retry before
+// the original response arrives. Both requests carry the same key, so exactly
+// one appointment must exist and both callers must receive it.
+func TestConcurrentIdempotentRetries(t *testing.T) {
+	t.Parallel()
+
+	const attempts = 8
+
+	f := newFixture(t)
+	ctx := t.Context()
+	start := slotAt(t, 12, 0)
+
+	cmd := appointment.BookCommand{
+		DoctorID:       f.doctorID,
+		PatientID:      f.patients[0],
+		StartsAt:       start,
+		IdempotencyKey: "concurrent-retry-" + f.doctorID.String()[:8],
+	}
+
+	results := make([]appointment.BookResult, attempts)
+	errs := make([]error, attempts)
+
+	var gate sync.WaitGroup
+	gate.Add(1)
+	var finished sync.WaitGroup
+
+	for i := range attempts {
+		finished.Add(1)
+		go func() {
+			defer finished.Done()
+			gate.Wait()
+			results[i], errs[i] = f.service.Book(ctx, cmd)
+		}()
+	}
+
+	gate.Done()
+	finished.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("idempotent retry %d failed: %v", i, err)
+		}
+	}
+
+	// Every caller must have been handed the same appointment.
+	first := results[0].Appointment.ID
+	for i, result := range results {
+		if result.Appointment.ID != first {
+			t.Fatalf("retry %d returned appointment %s, expected %s",
+				i, result.Appointment.ID, first)
+		}
+	}
+	if count := countActive(t, f.doctorID, start); count != 1 {
+		t.Fatalf("expected exactly 1 appointment despite %d concurrent retries, found %d", attempts, count)
+	}
+	if events := countEvents(t, first); events != 1 {
+		t.Fatalf("expected exactly 1 audit event, found %d", events)
+	}
+}
+
 // TestConcurrentCancellations proves the row lock serialises cancellations, so
 // only one caller can be the one who cancelled it.
 func TestConcurrentCancellations(t *testing.T) {

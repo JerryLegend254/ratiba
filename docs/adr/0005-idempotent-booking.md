@@ -45,6 +45,22 @@ becomes `(authenticated principal, key)` — a one-line change.
 was later cancelled, a replay still shows the original `booked` state. Answering
 a `201`-shaped request with a cancelled appointment would be incoherent.
 
+## The race that this decision had to accommodate
+
+The appointment `INSERT` happens **before** the idempotency-key `INSERT`, because
+the key row has a foreign key to the appointment.
+
+That means a retry racing its own original trips the **slot** unique index first,
+and would naively be answered `409 slot_unavailable` — turning a safe retry into
+a spurious failure.
+
+The service therefore checks, on a slot conflict with a key present, whether a
+committed record exists for the same `(patient, key)`; if so, the conflict was
+caused by its own twin and the stored response is returned.
+
+**This was found by `TestConcurrentIdempotentRetries`, not by review.** The
+single-threaded tests all passed. See `AI_REFLECTION.md`.
+
 ## Alternatives considered
 
 ### Do nothing; document that clients should check before retrying
@@ -99,10 +115,7 @@ normally.
 
 - `TestServiceBookIdempotency` — replay, key reuse, malformed keys, per-patient
   independence, and that a replay reflects the original state after cancellation.
+- `TestConcurrentIdempotentRetries` — 8 concurrent retries against real
+  PostgreSQL produce one appointment and one audit event.
 - `TestIdempotencyPersistence` — a replay works from a *different* service
   instance, which is what happens when a retry lands on another replica.
-
-Still missing, and needed before this can be trusted: a test that fires several
-retries with the same key **concurrently**. Every test above is
-single-threaded, and the whole point of this feature is the case where a client
-retries before the first response arrives.

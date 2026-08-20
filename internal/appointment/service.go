@@ -275,6 +275,20 @@ func (s *Service) Book(ctx context.Context, cmd BookCommand) (BookResult, error)
 		return BookResult{Appointment: created}, nil
 
 	case errors.Is(txErr, ErrSlotTaken):
+		// A retry that raced its own original loses here, not on the
+		// idempotency key: the appointment INSERT is attempted first (the key
+		// record has a foreign key to it), so the twin that arrives second
+		// trips the slot index before it ever writes its key. Treating that as
+		// a plain conflict would turn a safe retry into a spurious 409, so
+		// check for a committed twin before giving up.
+		if cmd.IdempotencyKey != "" {
+			if result, ok, err := s.resolveIdempotentTwin(ctx, cmd, fingerprint); err != nil {
+				return BookResult{}, err
+			} else if ok {
+				return result, nil
+			}
+		}
+
 		s.metrics.RecordOutcome(OperationBook, OutcomeConflict)
 		s.logger.InfoContext(ctx, "booking rejected: slot taken",
 			slog.String("event", "appointment.slot_conflict"),
@@ -284,9 +298,10 @@ func (s *Service) Book(ctx context.Context, cmd BookCommand) (BookResult, error)
 		return BookResult{}, ErrSlotUnavailable()
 
 	case errors.Is(txErr, ErrIdempotencyKeyExists):
-		// A concurrent request with the same key committed first. Its
-		// transaction included the stored response, so the record is now
-		// visible to a fresh read and the retry can be answered from it.
+		// Reached when two requests share a key but target different slots:
+		// both appointment INSERTs succeed, and the second key INSERT loses.
+		// The winner's transaction included its stored response, so the record
+		// is now visible to a fresh read.
 		record, found, err := s.repo.FindIdempotencyRecord(ctx, cmd.PatientID, cmd.IdempotencyKey)
 		if err != nil || !found {
 			return BookResult{}, apperror.Internal(fmt.Errorf("resolve concurrent idempotent booking: %w", txErr))
@@ -300,6 +315,30 @@ func (s *Service) Book(ctx context.Context, cmd BookCommand) (BookResult, error)
 		}
 		return BookResult{}, apperror.Internal(fmt.Errorf("book appointment: %w", txErr))
 	}
+}
+
+// resolveIdempotentTwin checks whether a slot conflict was actually caused by
+// this request's own concurrent duplicate.
+//
+// ok is true only when a committed record exists for the same (patient, key),
+// in which case the caller should return the replayed result instead of a
+// conflict. A record with a different fingerprint is a genuine misuse of the
+// key and is returned as an error.
+func (s *Service) resolveIdempotentTwin(ctx context.Context, cmd BookCommand, fingerprint string) (BookResult, bool, error) {
+	record, found, err := s.repo.FindIdempotencyRecord(ctx, cmd.PatientID, cmd.IdempotencyKey)
+	if err != nil {
+		return BookResult{}, false, apperror.Internal(fmt.Errorf("look up idempotency record after conflict: %w", err))
+	}
+	if !found {
+		// Somebody else's booking took the slot. A real conflict.
+		return BookResult{}, false, nil
+	}
+
+	result, err := s.replay(record, fingerprint)
+	if err != nil {
+		return BookResult{}, false, err
+	}
+	return result, true, nil
 }
 
 // replay answers a booking retry from a stored response.
