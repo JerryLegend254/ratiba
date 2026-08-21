@@ -76,7 +76,7 @@ Status: ✅ done and verified · ⚠️ configured but not executed · ❌ not d
 | Deployed to a cloud provider | ✅ | Railway, three isolated environments each with its own PostgreSQL |
 | Reachable at a public URL | ✅ | https://ratiba-api-production.up.railway.app |
 | Deployment configured | ✅ | [`railway.json`](../railway.json): Dockerfile builder, pre-deploy migration, `/readyz` health check, drain and restart policy |
-| **CI runs the test suite on every pull request** | ✅ | [`ci.yml`](../.github/workflows/ci.yml) — `on: pull_request`. 7 parallel jobs |
+| **CI runs the test suite on every pull request** | ✅ | [`ci.yml`](../.github/workflows/ci.yml) — `on: pull_request`. 7 parallel jobs. Note: an invalid workflow expression meant this file failed to parse and every run died in 0s until it was fixed on 21 Aug; the jobs themselves are verified locally, and `make verify-workflows` now gates the file |
 | **Automatic deploy when a PR is merged into a designated branch** | ⚠️ | [`deploy.yml`](../.github/workflows/deploy.yml) — `on: push` to `dev`/`staging`/`main`. Merging a PR *is* a push; GitHub has no separate "merged" event |
 | README states the public URL | ✅ | https://ratiba-api-production.up.railway.app, in the status table |
 | README states which branch triggers a deploy, and how | ✅ | [README — Branch → environment mapping](../README.md#branch--environment-mapping) |
@@ -86,6 +86,14 @@ Status: ✅ done and verified · ⚠️ configured but not executed · ❌ not d
 not yet observed end to end is a CI-*driven* deploy — the environments were
 provisioned and first-deployed from a workstation, so the next push to a
 protected branch is the first time the workflow itself does the deploying.
+
+The first attempts at that failed, for reasons worth recording rather than
+quietly fixing: the deploy job pinned a Railway CLI predating the current
+project-token exchange, and the CI workflow contained an expression error that
+prevented it from ever running. Both are fixed and the diagnosis is in
+[docs/ai-worklog.md](ai-worklog.md). Neither fix can be validated by re-running
+the failed jobs, because a re-run replays the workflow file from the commit it
+is re-running — only a fresh push exercises it.
 
 ---
 

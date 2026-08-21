@@ -179,8 +179,13 @@ verify-workflows: ## Type-check the GitHub Actions workflows and their expressio
 	@actionlint .github/workflows/*.yml
 	@echo "==> Workflows are valid"
 
+.PHONY: lint-config
+lint-config: ## Validate .golangci.yml against the schema of the pinned version
+	@golangci-lint config verify
+	@echo "==> Lint configuration is valid"
+
 .PHONY: lint
-lint: ## Run golangci-lint
+lint: lint-config ## Run golangci-lint
 	golangci-lint run ./...
 
 .PHONY: vulncheck
