@@ -1,0 +1,49 @@
+# Keep the build context small and free of anything secret.
+#
+# Note what is deliberately NOT excluded: db/migrations and api/openapi.yaml are
+# embedded into the binaries at compile time, so excluding them would produce an
+# image that fails at runtime rather than at build time.
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Version control and CI
+.git
+.gitignore
+.github
+.golangci.yml
+
+# Local state and build output
+bin/
+dist/
+coverage.out
+coverage.html
+*.test
+*.out
+.railway/
+
+# Editor and OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Documentation is not needed to build or run the binaries
+docs/
+*.md
+!README.md
+deploy/observability/
+
+# Docker and compose files are not part of the image
+Dockerfile
+.dockerignore
+compose.yaml
+compose.*.yaml
+
+# The assessment brief itself
+*.pdf

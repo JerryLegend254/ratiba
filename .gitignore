@@ -6,6 +6,13 @@
 *.key
 secrets/
 
+# Test and coverage output
+coverage.out
+coverage.html
+coverage/
+*.test
+*.prof
+
 # Build output
 bin/
 dist/
