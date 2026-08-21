@@ -15,6 +15,7 @@ correct do not need a record.
 | [0004](0004-timezones-and-slots.md) | Store instants, interpret in the doctor's timezone | Accepted |
 | [0005](0005-idempotent-booking.md) | Idempotency-Key on booking | Accepted |
 | [0006](0006-reschedule-semantics.md) | Rescheduling to the current slot is a conflict | Accepted |
+| [0007](0007-deferred-authentication.md) | Authentication is deferred and documented | Accepted |
 
 Format: context, decision, alternatives, consequences, date. Records are
 immutable — a reversed decision gets a **new** record that supersedes the old

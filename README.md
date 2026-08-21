@@ -346,7 +346,7 @@ appointment they do not. ([ADR 0005](docs/adr/0005-idempotent-booking.md))
 
 | Not building | Why |
 |---|---|
-| Authentication / authorisation | Not in the brief. Will be documented as a known gap and a threat-model boundary rather than half-built — a decorative control is worse than an absent one |
+| Authentication / authorisation | Not in the brief. Documented as a known gap rather than half-built — a decorative control is worse than an absent one ([ADR 0007](docs/adr/0007-deferred-authentication.md), [security](docs/security.md)) |
 | Rate limiting | Needs shared state across replicas to mean anything |
 | Notifications, billing, a frontend | Not in the brief |
 | Recurring appointments, waitlists, overbooking | Not in the brief; each would change the slot model |
@@ -390,14 +390,20 @@ implementation and the tests:
 
 ## Documentation
 
-| Document | What it covers |
+| Document | What it answers |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | Layers, dependency direction, transaction boundaries, trust boundaries |
-| [docs/data-model.md](docs/data-model.md) | Tables, constraints, indexes, state transitions, timezone representation |
-| [docs/adr/](docs/adr/) | Numbered decision records |
-
-Timezone and slot representation is the subtlest part of the domain; its
-reasoning is in [ADR 0004](docs/adr/0004-timezones-and-slots.md).
+| [docs/architecture.md](docs/architecture.md) | How is the system put together, and why that way? |
+| [docs/api.md](docs/api.md) | How do I call it? Every endpoint, with copy-paste examples. |
+| [docs/data-model.md](docs/data-model.md) | What is stored, what invariants hold, and how double-booking is prevented. |
+| [docs/testing.md](docs/testing.md) | What is tested, how to run it, and how to debug a failure. |
+| [docs/operations.md](docs/operations.md) | Configuration, logs, metrics, traces, and how to debug a live request. |
+| [docs/deployment.md](docs/deployment.md) | Branch → environment mapping, Railway setup, rollback. |
+| [docs/security.md](docs/security.md) | Threat model, what is protected, and what is deliberately not. |
+| [docs/glossary.md](docs/glossary.md) | Clinic and technical terms used throughout. |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Setup from a fresh clone, the development loop, where new code goes. |
+| [docs/adr/](docs/adr/) | Numbered decision records for the choices worth arguing about. |
+| [docs/runbooks/](docs/runbooks/) | Symptom-first incident procedures. |
+| [api/examples.http](api/examples.http) | Runnable request collection for the full lifecycle. |
 
 ---
 

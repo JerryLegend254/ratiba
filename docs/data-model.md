@@ -18,6 +18,8 @@ erDiagram
     doctors ||--o{ appointments : "sees"
     patients ||--o{ appointments : "books"
     appointments ||--o{ appointment_events : "audited by"
+    patients ||--o{ idempotency_keys : "scoped to"
+    appointments ||--o| idempotency_keys : "replayed by"
 
     doctors {
         uuid id PK
@@ -65,6 +67,17 @@ erDiagram
         timestamptz to_starts_at "set on book and reschedule"
         text source "provenance, not identity"
         timestamptz occurred_at
+    }
+
+    idempotency_keys {
+        uuid id PK
+        uuid patient_id FK
+        text idempotency_key
+        text request_fingerprint "SHA-256 of the parsed request"
+        uuid appointment_id FK
+        smallint response_status
+        jsonb response_body "the original response"
+        timestamptz expires_at
     }
 ```
 
@@ -143,6 +156,17 @@ text ends up somewhere it should not be.
 this service has no authentication. When auth lands, this becomes the natural
 place for an actor ID.
 
+### `idempotency_keys`
+
+| Column | Notes |
+|---|---|
+| `request_fingerprint` | SHA-256 over the **parsed** fields, not the raw bytes, so whitespace and key ordering do not create false conflicts |
+| `response_body` | The original response, so a replay returns what the client first saw |
+| `expires_at` | Swept by `ratiba-migrate purge-idempotency` |
+
+Scoped `(patient_id, idempotency_key)`. See
+[ADR 0005](adr/0005-idempotent-booking.md).
+
 ---
 
 ## The concurrency invariant
@@ -184,11 +208,10 @@ sequenceDiagram
     Note over PG: One row. Always.
 ```
 
-The persistence layer will translate `23505` on this specific constraint into a
-domain "slot taken" error, which becomes `409 slot_unavailable`. That mapping
-depends on the **constraint name**, so it needs a test of its own: renaming the
-constraint in a future migration must fail loudly rather than silently degrade
-the conflict into a `500`.
+The adapter translates `23505` on `appointments_active_slot_uniq` into
+`appointment.ErrSlotTaken`, which the service maps to `409 slot_unavailable`.
+`TestConstraintTranslation` pins that mapping, so renaming the constraint in a
+migration fails a test rather than silently degrading the conflict into a `500`.
 
 ### Why not an exclusion constraint
 
@@ -235,12 +258,13 @@ on `uuid` and `smallint` can be mixed with range overlap in one GiST index.
 | `doctor_working_hours_weekday_check` | `doctor_working_hours` | `0..6` |
 | `doctors_slug_format_check` | `doctors` | Lowercase-hyphenated |
 | `patients_email_format_check` | `patients` | Basic shape |
+| `idempotency_keys_scope_key` | `idempotency_keys` | One response per `(patient, key)` |
+| `idempotency_keys_fingerprint_check` | `idempotency_keys` | 64 lowercase hex characters |
 | Foreign keys | all | `ON DELETE RESTRICT` on appointments — a doctor with appointments cannot be deleted out from under them |
 
-Each of these needs a test that writes SQL **directly**, bypassing the
-application, because the point of putting them in the schema is that they hold
-even against a future code path that forgets to validate. Those tests arrive
-with the persistence layer.
+Every one is exercised by `TestDatabaseEnforcesInvariants`, which writes SQL
+**directly**, bypassing the application. The point is that the schema protects
+the data even against a future code path that forgets to validate.
 
 ---
 
@@ -253,6 +277,7 @@ with the persistence layer.
 | `appointments_patient_starts_at_idx` | `GET /patients/{id}/appointments` — `(patient_id, starts_at, id)` matches the query's `ORDER BY` exactly, so no sort is needed |
 | `doctor_working_hours_doctor_weekday_idx` | Schedule lookup |
 | `appointment_events_appointment_idx` | Audit trail retrieval |
+| `idempotency_keys_expires_at_idx` | The retention sweep |
 
 ---
 
@@ -293,23 +318,23 @@ history of one appointment.
 | A doctor's working hours | `time` + IANA zone on the doctor | "09:00 local" must survive DST. Storing an offset would break twice a year |
 | A requested calendar date | Not stored — a query parameter | Interpreted in the doctor's zone at request time |
 
-Intended round trip for "book 09:00 with Dr. Wanjiru on 2026-09-07":
+Round trip for "book 09:00 with Dr. Wanjiru on 2026-09-07":
 
 1. Client sends `2026-09-07T06:00:00Z` (or `…T09:00:00+03:00` — same instant).
 2. The doctor's zone `Africa/Nairobi` resolves the local date to `2026-09-07`.
-3. The working-hours rows for that weekday become absolute time windows.
-4. Those windows are stepped through in **absolute time**, so each slot is
-   exactly 30 real minutes rather than 30 wall-clock minutes.
-5. The requested start must equal one of the generated instants.
+3. `doctor.Schedule.WindowsOn` turns `09:00`–`13:00` local into absolute instants.
+4. `Policy.SlotsOn` steps through in **absolute time**, so each slot is exactly
+   30 real minutes.
+5. The requested start must equal one of those instants.
 6. `06:00:00Z` is stored.
 
 Under DST, the wall clock stays fixed and the UTC instant shifts — a 09:00
 appointment stays at 09:00 local. If a transition falls *inside* a working
 window, that window has fewer real hours than the clock suggests and the
-generator must emit correspondingly fewer slots, because a slot is only valid if
-it fits entirely inside the window. This needs explicit tests either side of a
-real DST transition; the seed data will include a doctor in a DST-observing zone
-so it is exercised by the demo data too.
+generator emits correspondingly fewer slots, because a slot is only emitted if it
+fits entirely inside the window. Tested in
+[`policy_test.go`](../internal/appointment/policy_test.go) and
+[`doctor_test.go`](../internal/doctor/doctor_test.go).
 
 ---
 
@@ -319,21 +344,32 @@ so it is exercised by the demo data too.
 |---|---|---|
 | `appointments` | Indefinite, including cancelled | Clinical records; the audit trail is the point |
 | `appointment_events` | Indefinite, append-only | Never updated or deleted |
+| `idempotency_keys` | `BOOKING_IDEMPOTENCY_TTL` (24 h) | A replay window, not a record |
+
+Purging expired keys is a manual command:
+
+```bash
+ratiba-migrate purge-idempotency
+```
+
+Kept explicit rather than run as a background goroutine: a scheduled job is
+visible, has logs, and cannot silently stop the way a forgotten goroutine can.
 
 **Not implemented:** patient data deletion for a right-to-erasure request. It
 would need a documented policy on what to do with clinical records that are
-subject to retention requirements — a compliance decision, not a coding one.
+subject to retention requirements — a compliance decision, not a coding one. See
+[security](security.md).
 
 ---
 
 ## Making a schema change
 
-1. Every migration needs a working `Down`. It should be exercised by migrating
-   all the way down and back up against a throwaway database, not assumed.
+See [CONTRIBUTING](../CONTRIBUTING.md#database-migrations). The rules that matter
+most:
+
+1. Every migration needs a working `Down`. CI migrates all the way down and back
+   up on a throwaway database.
 2. Migrations must be **forward-compatible with the running code** — during a
    deploy the old version is still serving while the migration runs. Use
    expand/contract: add nullable, backfill, require it in a later release.
-3. Numbering is strictly sequential. Migrations are applied in filename order,
-   so a gap or a reuse means two environments can end up with different schemas
-   from the same commit.
-4. Never edit a migration that has been applied anywhere. Write a new one.
+3. Run `make generate` afterwards; sqlc reads the migrations directly.

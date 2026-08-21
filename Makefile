@@ -45,6 +45,15 @@ help: ## Show this help
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
+.PHONY: dev
+dev: up ## Start the whole stack and wait until it answers
+	@bash scripts/wait-for-ready.sh $(API_URL)
+	@echo ""
+	@echo "  API      $(API_URL)"
+	@echo "  Docs     $(API_URL)/docs"
+	@echo "  Health   $(API_URL)/readyz"
+	@echo "  Doctors  $(API_URL)/doctors"
+
 .PHONY: up
 up: ## Build and start postgres, run migrations and seed, start the API
 	docker compose up --build -d

@@ -1,0 +1,340 @@
+# Deployment
+
+**Current status: not deployed.** Everything below is configured as code and
+verified locally. The steps in [First deployment](#first-deployment) require
+Railway and GitHub account access, which was not available on the machine this
+was built on. No public URL is claimed anywhere in this repository.
+
+This document separates, explicitly:
+
+- **Automated** — happens with no human action once secrets exist
+- **Manual prerequisite** — a person must do it once, in a dashboard or CLI
+
+---
+
+## Topology
+
+```mermaid
+flowchart TD
+    subgraph github["GitHub"]
+        Dev["branch: dev"]
+        Stg["branch: staging"]
+        Main["branch: main"]
+        EnvD["Environment: development<br/><i>RAILWAY_TOKEN</i>"]
+        EnvS["Environment: staging<br/><i>RAILWAY_TOKEN</i>"]
+        EnvP["Environment: production<br/><i>RAILWAY_TOKEN</i><br/><i>+ reviewer</i>"]
+    end
+
+    subgraph railway["Railway project: ratiba"]
+        subgraph rd["environment: development"]
+            AD["ratiba-api"]
+            DD[("PostgreSQL")]
+        end
+        subgraph rs["environment: staging"]
+            AS["ratiba-api"]
+            DS[("PostgreSQL")]
+        end
+        subgraph rp["environment: production"]
+            AP["ratiba-api"]
+            DP[("PostgreSQL")]
+        end
+    end
+
+    Dev --> EnvD --> AD --> DD
+    Stg --> EnvS --> AS --> DS
+    Main --> EnvP --> AP --> DP
+```
+
+| Git branch | GitHub environment | Railway environment | Database | Purpose |
+|---|---|---|---|---|
+| `dev` | `development` | `development` | dedicated | Integration |
+| `staging` | `staging` | `staging` | dedicated | Release validation |
+| `main` | `production` | `production` | dedicated | The submitted application |
+
+**Nothing is shared.** Each environment has its own PostgreSQL and its own
+project-scoped Railway token. A leaked development token cannot reach production
+data, and no environment can point at another's database.
+
+---
+
+## How a deploy is triggered
+
+The assessment asks for automatic deployment "when a PR is merged into a
+designated branch". GitHub Actions has **no "pull request merged" event**.
+Merging a PR produces a `push` to the target branch, and that push is the
+trigger:
+
+```yaml
+on:
+  push:
+    branches: [dev, staging, main]
+```
+
+This is the standard mechanism, and it is why
+[`deploy.yml`](../.github/workflows/deploy.yml) keys off `push` rather than
+`pull_request`.
+
+### What the workflow does
+
+1. **Resolve** the target environment from the branch. One mapping, in one place.
+2. **Re-run the quality gates** against the merge commit. The PR was tested
+   against a *merge preview*; this is the commit that will actually be deployed.
+3. **Check the configuration is present** — a precise error naming the missing
+   secret beats a confusing Railway CLI failure.
+4. **Deploy** with `railway up --ci --service <service>`.
+5. **Railway runs the pre-deploy migration** (`ratiba-migrate up`). If it fails,
+   the release is aborted and the previous version keeps serving.
+6. **Poll `/readyz`** with bounded exponential backoff, up to 40 attempts.
+7. **Verify the deployed commit** matches the one that was pushed — this catches
+   the case where readiness passed because the *previous* version was still
+   serving.
+8. **Smoke test.** Read-only against production; the full write lifecycle against
+   development and staging.
+9. **Summarise** the environment, commit, URL and result in the job summary.
+
+Deployments are **serialised per environment** by workflow concurrency, so two
+quick merges cannot have the older commit land last. `cancel-in-progress` is
+deliberately `false` — aborting a deploy mid-rollout is worse than waiting.
+
+---
+
+## Railway configuration
+
+[`railway.json`](../railway.json) is committed and identical across
+environments; everything that differs is a Railway variable. Each key is
+explained in [railway-config.md](railway-config.md).
+
+The line that matters most:
+
+```json
+"preDeployCommand": ["/usr/local/bin/ratiba-migrate up"]
+```
+
+Migrations run **once**, in a separate container, from the **same image** that
+will serve traffic, **before** any new replica starts. This is why the API
+binary never migrates on startup: N replicas racing to apply migrations is a
+classic way to corrupt a schema or deadlock a rollout.
+
+```mermaid
+sequenceDiagram
+    participant CI as GitHub Actions
+    participant RW as Railway
+    participant Mig as pre-deploy container
+    participant PG as PostgreSQL
+    participant Old as Current replica
+    participant New as New replica
+
+    CI->>RW: railway up --ci
+    RW->>RW: build image from Dockerfile
+    RW->>Mig: run ratiba-migrate up
+    Mig->>PG: acquire advisory lock
+    Mig->>PG: apply pending migrations
+    alt migration fails
+        Mig-->>RW: non-zero exit
+        RW-->>CI: deploy aborted
+        Note over Old: keeps serving the old version
+    else migration succeeds
+        Mig->>PG: release lock
+        RW->>New: start ratiba-api
+        New->>PG: connect, verify
+        RW->>New: poll /readyz
+        New-->>RW: 200 ready
+        Note over Old,New: overlapSeconds — both serve
+        RW->>Old: SIGTERM
+        Old->>Old: fail readiness · drain · exit 0
+        RW-->>CI: deploy succeeded
+    end
+```
+
+### Migration safety during a rolling deploy
+
+The old version is **still serving** while the migration runs. A migration must
+therefore be forward-compatible with the code already deployed.
+
+Use expand/contract:
+
+| Release | Action |
+|---|---|
+| 1 | Add the column as **nullable**, deploy code that writes both old and new |
+| 2 | Backfill |
+| 3 | Add `NOT NULL`, deploy code that reads only the new column |
+| 4 | Drop the old column |
+
+A single migration adding a `NOT NULL` column with no default breaks every insert
+the currently-running version attempts.
+
+---
+
+## First deployment
+
+**All of this is manual** and requires account access. Roughly 20 minutes.
+
+### 1. Railway project and environments
+
+```bash
+railway login
+railway init --name ratiba
+
+# The default environment is 'production'; add the other two.
+railway environment new development
+railway environment new staging
+```
+
+### 2. A PostgreSQL per environment
+
+**Once per environment** — this is the step that keeps the data isolated:
+
+```bash
+railway environment development && railway add --database postgres
+railway environment staging    && railway add --database postgres
+railway environment production && railway add --database postgres
+```
+
+Verify each environment has its **own** database service before continuing.
+Pointing staging at production is the single most damaging mistake available
+here.
+
+### 3. Service variables
+
+For each environment, in the Railway dashboard or via `railway variables --set`:
+
+```bash
+APP_ENV=production                       # or development / staging
+DATABASE_URL=${{Postgres.DATABASE_URL}}  # a REFERENCE, not a literal
+LOG_FORMAT=json
+LOG_LEVEL=info
+METRICS_ENABLED=true
+METRICS_AUTH_TOKEN=<openssl rand -hex 32>
+DB_MAX_CONNS=10
+BOOKING_MIN_LEAD_TIME=1h
+```
+
+Notes:
+
+- **Do not set `PORT`.** Railway injects it.
+- Use the `${{Postgres.DATABASE_URL}}` reference so a rotated password
+  propagates without a redeploy.
+- `METRICS_AUTH_TOKEN` is **mandatory** in production — the service will refuse
+  to start without it. Generate a distinct token per environment.
+
+### 4. Railway tokens
+
+Create one **project-scoped** token per environment (Project Settings → Tokens).
+A project token is already bound to one environment, so a workflow using it
+cannot deploy to the wrong one. Do **not** use an account-wide token.
+
+### 5. GitHub Environments
+
+Create `development`, `staging` and `production` (Settings → Environments).
+
+Per environment:
+
+| Kind | Name | Value |
+|---|---|---|
+| **Secret** | `RAILWAY_TOKEN` | The project token for that Railway environment |
+| Variable | `RAILWAY_SERVICE` | The Railway service name, e.g. `ratiba-api` |
+| Variable | `PUBLIC_URL` | The public URL, e.g. `https://ratiba-production.up.railway.app` |
+
+For `production`, add a **required reviewer** protection rule. This still
+satisfies "deploys automatically on merge" — the deploy is *triggered* by the
+merge and *gated* on approval; nobody has to initiate it by hand.
+
+### 6. Branch protection
+
+Settings → Branches, for `main`, `staging` and `dev`:
+
+- Require a pull request before merging
+- Require the **`CI passed`** status check
+- Require conversation resolution
+- Block force pushes and deletion
+- Require one approving review where the plan allows it
+
+`CI passed` is a single aggregate job that fails if **any** required job did not
+succeed — including skipped or cancelled ones, which a plain `needs` would let
+through.
+
+> These settings could not be applied or verified from this machine. They are
+> recommendations, not claims.
+
+### 7. Deploy
+
+```bash
+git push origin dev
+```
+
+Watch the Actions run. On success, verify:
+
+```bash
+curl https://<dev-url>/readyz
+bash scripts/smoke.sh https://<dev-url>
+```
+
+Then promote: `dev` → `staging` → `main`, by pull request each time.
+
+### 8. Record the URL
+
+Put the production URL in the README's status table. **Only after it responds.**
+
+---
+
+## Rollback
+
+### Application
+
+Redeploy the previous release from Railway's deployment history (or
+`railway redeploy`). The image is immutable, so this is exact.
+
+### Database — forward-fix, do not roll back
+
+**Down-migrations are not run in production.** Every migration has a tested
+`Down` section, and CI exercises them, but they exist for local development and
+CI.
+
+The reason: a down-migration that reverses `ADD COLUMN` runs `DROP COLUMN`. That
+destroys every value written since the migration applied. **The schema goes back;
+the data does not.** For a clinic, that is patient bookings gone.
+
+Instead:
+
+1. Roll the **application** back to the previous release. Immediate, safe, and
+   restores service.
+2. Write a **new** migration that corrects the schema forward.
+3. Deploy it through the normal pipeline.
+
+This is slower under pressure and it is the right trade-off: a rollback that
+destroys data turns a bad deploy into a data-loss incident.
+
+### If a migration fails mid-deploy
+
+Railway aborts the release and the previous version keeps serving — you are not
+down. See [runbooks/failed-migration.md](runbooks/failed-migration.md).
+
+---
+
+## Environment teardown
+
+```bash
+railway environment delete development
+```
+
+Deletes the database and its data. For production, take and **verify** a dump
+first.
+
+---
+
+## Verified vs. not
+
+| Item | Status |
+|---|---|
+| Dockerfile builds; image runs as UID 65532; no shell present | **Verified locally** |
+| `compose.yaml` and the observability profile validate | **Verified locally** |
+| Migrations apply, roll back and reapply | **Verified locally and in the integration suite** |
+| Seeding is idempotent | **Verified** — run twice, same result |
+| Graceful shutdown drains and exits 0 | **Verified** — observed in container logs |
+| Smoke script passes against a real container | **Verified** — 27/27 |
+| `railway.json` schema and semantics | **Written to Railway's documented schema; not executed** |
+| GitHub Actions workflows | **Written; not executed** — no authenticated GitHub access |
+| Railway environments, databases, tokens | **Not created** — no Railway credentials |
+| Public URL | **Does not exist** |
+
+Nothing in the "not" column is claimed as done anywhere else in this repository.

@@ -1,9 +1,7 @@
 # Architecture
 
-The intended shape of Ratiba, and the reasoning behind it. Written before the
-implementation, per Section 1 of the brief; it will be revised as the build
-either confirms or contradicts it. For the decisions behind individual choices,
-see [adr/](adr/).
+How Ratiba is put together, and why. For the decision records behind individual
+choices, see [adr/](adr/).
 
 ---
 
@@ -25,7 +23,7 @@ that.
 
 ---
 
-## Planned layers and dependency direction
+## Layers and dependency direction
 
 ```mermaid
 flowchart TD
@@ -89,19 +87,20 @@ flowchart TD
 `patient`, `apperror`, `calendar` and `clock` — and nothing else. It has no
 knowledge of `net/http`, `pgx`, or Prometheus.
 
-That is not architectural decoration. It is what should make the entire rule set
-testable in milliseconds with no database — including the DST edge cases, which
-are otherwise miserable to exercise.
+That is not architectural decoration. It is what makes the entire rule set
+testable in milliseconds with no database, and it is why
+[`policy_test.go`](../internal/appointment/policy_test.go) can exhaustively
+check DST behaviour without spinning up anything.
 
 ### The ports
 
 The domain declares the interfaces it needs, rather than importing an
-implementation:
+implementation ([`ports.go`](../internal/appointment/ports.go)):
 
 | Port | Purpose |
 |---|---|
 | `Repository` | Reads, plus `WithinTx` for anything that writes |
-| `Tx` | The transactional write surface: lock, create, cancel, move, append event |
+| `Tx` | The transactional write surface: lock, create, cancel, move, append event, save idempotency record |
 | `ScheduleReader` | The narrow slice of `doctor.Repository` the service actually uses |
 | `PatientReader` | Likewise for patients |
 | `clock.Clock` | The only way to read the current time |
@@ -135,6 +134,12 @@ sequenceDiagram
     H->>H: parse UUIDs and RFC 3339 instant
     H->>S: Book(ctx, BookCommand)
 
+    S->>R: FindIdempotencyRecord
+    alt key already answered
+        R-->>S: stored snapshot
+        S-->>H: replayed result
+    end
+
     S->>R: load doctor, patient, schedule
     Note over S: All reads happen HERE,<br/>before any transaction opens.
     S->>P: ValidateStart(schedule, loc, now, start)
@@ -145,6 +150,7 @@ sequenceDiagram
     R->>PG: INSERT appointment
     Note over PG: The unique index decides.
     R->>PG: INSERT audit event
+    R->>PG: INSERT idempotency record (if a key was sent)
     R->>PG: COMMIT
 
     S-->>H: Appointment
@@ -155,7 +161,7 @@ sequenceDiagram
 
 ### Middleware order, and why
 
-Outermost first:
+Outermost first, from [`router.go`](../internal/transport/http/router.go):
 
 | # | Middleware | Why it sits there |
 |---|---|---|
@@ -166,10 +172,10 @@ Outermost first:
 | 5 | `recoverPanic` | Converts a panic into a problem document |
 | 6 | `timeout` | Innermost, so the deadline covers handler work only |
 
-`observe` must do its bookkeeping **after** the inner handler returns. That is
-the only moment the router has resolved the route template — and logging the raw
-path instead would put patient UUIDs into every log line and give the metrics an
-unbounded label.
+`observe` does its bookkeeping **after** the inner handler returns. That is the
+only moment chi has resolved the route template — and logging the raw path
+instead would put patient UUIDs into every log line and give the metrics an
+unbounded label. See [operations](operations.md#cardinality).
 
 ---
 
@@ -207,7 +213,7 @@ Every state change runs inside exactly one transaction, opened by
 
 | Use case | What is in the transaction |
 |---|---|
-| **Book** | INSERT appointment · INSERT audit event |
+| **Book** | INSERT appointment · INSERT audit event · INSERT idempotency record |
 | **Cancel** | `SELECT … FOR UPDATE` · UPDATE to cancelled · INSERT audit event |
 | **Reschedule** | `SELECT … FOR UPDATE` · UPDATE start/end · INSERT audit event |
 
@@ -220,8 +226,8 @@ cost a connection for no correctness benefit.
 > **No method reads through the repository, doctor reader or patient reader from
 > inside a `WithinTx` callback.**
 
-Every read happens before the transaction opens. This needs to be stated in a comment on the service itself, because it is the
-kind of rule that gets broken by a well-meaning refactor.
+Every read happens before the transaction opens. This is stated in a comment on
+`appointment.Service` and is worth understanding before changing anything there.
 
 Acquiring a second pool connection while holding one is a classic self-inflicted
 deadlock: under load, every connection in the pool ends up held by a transaction
@@ -287,19 +293,20 @@ talking to it.
 
 What must be checked before scaling out:
 
-1. **Connection budget.** Pool size × replicas must stay within the database's
-   `max_connections`, with headroom for migrations and manual sessions.
-2. **Migrations must stay a pre-deploy step**, never a startup step. N replicas
-   racing to migrate is a reliable way to corrupt a schema.
+1. **Connection budget.** `DB_MAX_CONNS × replicas` must stay within the
+   database's `max_connections`, with headroom for migrations and manual
+   sessions. See [operations](operations.md#connection-budget).
+2. **Migrations stay a pre-deploy step**, never a startup step. This is already
+   the case ([`railway.json`](../railway.json)).
 
 Where it would strain first, in order:
 
-| Bottleneck | Response |
-|---|---|
-| Connection pool | Raise the pool ceiling within the server's budget, or add PgBouncer |
-| Availability queries | Index-backed by design; cache with a short TTL only if measurement demands it |
-| Contention on one popular doctor | Expected behaviour, not a fault |
-| Write volume | Partition `appointments` by month; the audit table is append-only and partitions naturally |
+| Bottleneck | Symptom | Response |
+|---|---|---|
+| Connection pool | `db_pool_empty_acquire_total` climbing, latency up | Raise `DB_MAX_CONNS`, or add PgBouncer |
+| Availability queries | `http_request_duration_seconds` up on that route | Already index-backed; cache with a short TTL if needed |
+| Contention on one popular doctor | `appointment_operations_total{outcome="conflict"}` rising | Expected behaviour, not a fault — see the [conflicts runbook](runbooks/booking-conflicts.md) |
+| Write volume | Sustained high write latency | Partition `appointments` by month; the audit table is append-only and partitions naturally |
 
 ---
 
@@ -338,10 +345,8 @@ flowchart TD
   sanitised before it reaches a log field.
 - **Application → database.** Parameterised SQL exclusively. The connection
   string is a secret and is redacted everywhere it could be printed.
-- **No authentication boundary is planned.** Every caller will have the same,
-  complete authority. This is a deliberate scope decision for the assessment and
-  the single largest gap in the design; it needs its own decision record and a
-  threat model before submission.
+- **No authentication boundary exists.** This is the significant gap; see
+  [security](security.md).
 
 ---
 
@@ -360,6 +365,11 @@ flowchart TD
 
 ## Related reading
 
+- [Data model and invariants](data-model.md)
 - [ADR 0001 — Modular monolith](adr/0001-modular-monolith.md)
 - [ADR 0002 — PostgreSQL as system of record](adr/0002-postgresql.md)
 - [ADR 0003 — Concurrency strategy](adr/0003-concurrency-strategy.md)
+- [ADR 0004 — Timezone and slot representation](adr/0004-timezones-and-slots.md)
+- [ADR 0005 — Idempotent booking](adr/0005-idempotent-booking.md)
+- [ADR 0006 — Reschedule semantics](adr/0006-reschedule-semantics.md)
+- [ADR 0007 — Deferred authentication](adr/0007-deferred-authentication.md)

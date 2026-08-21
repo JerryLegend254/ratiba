@@ -22,15 +22,13 @@ not allow comments, so the reasoning lives here.
 | `drainingSeconds` | `20` | Matches `HTTP_SHUTDOWN_TIMEOUT`. The application fails readiness first, pauses, then drains in-flight requests; Railway must allow at least as long or it would `SIGKILL` mid-request. |
 | `restartPolicyType` | `ON_FAILURE` | A crash is retried. `ALWAYS` would also restart a clean exit, which for this service only happens during shutdown. |
 | `restartPolicyMaxRetries` | `5` | Bounded, so a configuration error (which fails deterministically at startup) surfaces as a failed deploy instead of an endless crash loop. |
-| `numReplicas` | `1` | Honest default for an assessment deployment. Correctness does not depend on it: the partial unique index enforces the no-double-booking rule across any number of replicas, and the concurrency tests prove it. Raising this requires only that `DB_MAX_CONNS × replicas` stays inside the database's connection limit. |
+| `numReplicas` | `1` | Honest default for an assessment deployment. Correctness does not depend on it: the partial unique index enforces the no-double-booking rule across any number of replicas, and the concurrency tests prove it. Raising this requires only that `DB_MAX_CONNS × replicas` stays inside the database's connection limit — see [operations](operations.md#connection-budget). |
 
 ## Environment variables per environment
 
 `railway.json` is committed and identical across environments. Everything that
-differs is a Railway variable, so no secret is ever in the repository:
-`APP_ENV`, `DATABASE_URL` (as a `${{Postgres.DATABASE_URL}}` reference, never a
-literal), `METRICS_AUTH_TOKEN`, and the pool and logging settings. `PORT` is
-injected by the platform and must not be set.
+differs is a Railway variable, so no secret is ever in the repository. See
+[deployment](deployment.md#railway-variables) for the full list.
 
 ## What deliberately is not here
 
@@ -38,6 +36,7 @@ injected by the platform and must not be set.
   gates pass, not by Railway watching the repository. Two independent deploy
   triggers would race.
 - **No cron / scheduled job.** The idempotency-key sweep
-  (`ratiba-migrate purge-idempotency`) is deliberately not scheduled: at this
-  data volume it is not yet needed, and an unattended job nobody monitors is a
-  liability.
+  (`ratiba-migrate purge-idempotency`) is documented in
+  [operations](operations.md#idempotency-key-retention) but not scheduled,
+  because at this data volume it is not yet needed and an unattended scheduled
+  job nobody monitors is a liability.
