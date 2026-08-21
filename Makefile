@@ -4,6 +4,24 @@
 SHELL := bash
 .SHELLFLAGS := -eu -o pipefail -c
 
+# The Go version pinned in go.mod. CI and the Dockerfile must agree with it;
+# `verify-go-version` checks that they do.
+GO_VERSION := $(shell awk '/^go /{print $$2}' go.mod)
+
+# Pinned tool versions. CI installs exactly these, so "works on my machine"
+# cannot be a lint-version difference.
+SQLC_VERSION        := v1.31.1
+GOLANGCI_VERSION    := v2.12.2
+GOVULNCHECK_VERSION := latest
+
+# Business-critical packages. Coverage is enforced on these, not on the whole
+# module — a threshold averaged over generated code and wiring measures nothing.
+CRITICAL_PACKAGES := \
+	github.com/JerryLegend254/ratiba/internal/appointment \
+	github.com/JerryLegend254/ratiba/internal/doctor \
+	github.com/JerryLegend254/ratiba/internal/patient
+COVERAGE_THRESHOLD := 80
+
 POSTGRES_USER     ?= ratiba
 POSTGRES_PASSWORD ?= ratiba_local_dev
 POSTGRES_DB       ?= ratiba
@@ -41,6 +59,21 @@ clean: ## Stop the stack, delete the database volume and build output
 .PHONY: logs
 logs: ## Follow the API logs
 	docker compose logs -f api
+
+.PHONY: doctor
+doctor: ## Check local prerequisites and report what is missing
+	@bash scripts/doctor.sh
+
+.PHONY: bootstrap
+bootstrap: ## Install pinned development tools and create .env
+	@echo "==> Installing pinned tools"
+	go install github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION)
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
+	go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
+	@if [ ! -f .env ]; then cp .env.example .env && echo "==> Created .env from .env.example"; \
+	 else echo "==> .env already exists, leaving it alone"; fi
+	go mod download
+	@echo "==> Ready. Next: make up"
 
 .PHONY: db-start
 db-start: ## Start only PostgreSQL, for running the API natively
@@ -115,6 +148,26 @@ format-check: ## Fail if any Go file is not gofmt-clean
 	fi
 	@echo "==> All files are formatted"
 
+.PHONY: verify-go-version
+verify-go-version: ## Fail if go.mod, the Dockerfile and CI disagree on the Go version
+	@bash scripts/verify-go-version.sh
+
+.PHONY: verify-migrations
+verify-migrations: ## Check migration filenames are sequential and well-formed
+	@bash scripts/verify-migrations.sh
+
+.PHONY: verify-docs
+verify-docs: ## Check that every relative link in the documentation resolves
+	@bash scripts/verify-docs.sh
+
+.PHONY: lint
+lint: ## Run golangci-lint
+	golangci-lint run ./...
+
+.PHONY: vulncheck
+vulncheck: ## Scan dependencies for known vulnerabilities
+	govulncheck ./...
+
 .PHONY: vet
 vet: ## Run go vet, including build-tagged files
 	go vet ./...
@@ -161,3 +214,18 @@ verify-openapi: ## Validate the OpenAPI contract and check it matches the routes
 
 .PHONY: test
 test: unit-test integration-test ## Run every test suite
+
+.PHONY: coverage
+coverage: test-db ## Measure coverage and enforce the threshold on critical packages
+	@bash scripts/coverage.sh coverage.out $(COVERAGE_THRESHOLD) $(CRITICAL_PACKAGES)
+
+.PHONY: coverage-html
+coverage-html: coverage ## Open the coverage report in a browser
+	go tool cover -html=coverage.out -o coverage.html
+	@echo "==> Wrote coverage.html"
+
+.PHONY: check
+check: verify-go-version format-check vet lint verify-generate verify-migrations verify-openapi verify-docs vulncheck ## Run every static check
+
+.PHONY: ci
+ci: check test coverage build docker-build verify-compose ## Everything CI runs
