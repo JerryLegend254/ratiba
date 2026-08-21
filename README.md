@@ -22,9 +22,10 @@ seriously.
 
 | | |
 |---|---|
-| **Public URL** | *Not yet deployed.* Deployment is fully configured as code but has not been executed — see [Deployment status](#deployment-status) for exactly what remains. |
-| **API docs** | `/docs` (Swagger UI) and `/openapi.yaml` (raw contract) on any running instance |
-| **Health** | `/livez` (liveness) and `/readyz` (readiness) |
+| **Public URL** | **https://ratiba-api-production.up.railway.app** |
+| **API docs** | [https://ratiba-api-production.up.railway.app/docs](https://ratiba-api-production.up.railway.app/docs) · [raw contract](https://ratiba-api-production.up.railway.app/openapi.yaml) |
+| **Health** | [https://ratiba-api-production.up.railway.app/readyz](https://ratiba-api-production.up.railway.app/readyz) · [https://ratiba-api-production.up.railway.app/livez](https://ratiba-api-production.up.railway.app/livez) |
+| **Try it** | [`GET /doctors`](https://ratiba-api-production.up.railway.app/doctors) · [error catalogue](https://ratiba-api-production.up.railway.app/problems) |
 | **CI** | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) — runs on every pull request |
 | **CD** | [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) — deploys on push to `dev`, `staging`, `main` |
 
@@ -89,7 +90,7 @@ readable.
 - [x] CI runs the full test suite on every pull request
 - [x] Push to a protected branch (which is what merging a PR produces) deploys automatically
 - [x] Deployment configured as code (`railway.json`) with three isolated environments
-- [ ] Deployed to a public URL — **not yet executed**, see [Deployment status](#deployment-status)
+- [x] Deployed to a public URL on Railway, across three isolated environments
 
 **Beyond the brief** — added because the role is technical-support focused, and
 these are what make an API debuggable at 2am:
@@ -697,28 +698,30 @@ deploy is triggered by the merge and gated on approval, not initiated by hand.
 
 ---
 
-## Deployment status
+## Deployment
 
-**No public URL is claimed, because none exists yet.** Everything that can be
-built and verified locally has been. What remains is the external boundary.
+Live on Railway across three isolated environments, each with its own
+PostgreSQL, its own secrets, and its own project-scoped deploy token.
 
-Verified and committed:
+| Environment | Branch | URL |
+|---|---|---|
+| Production | `main` | https://ratiba-api-production.up.railway.app |
+| Staging | `staging` | https://ratiba-api-staging.up.railway.app |
+| Development | `dev` | https://ratiba-api-development.up.railway.app |
 
-- [`railway.json`](railway.json) — Dockerfile builder, pre-deploy migration, `/readyz` health check, drain and restart policy ([annotated](docs/railway-config.md))
-- [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) — branch mapping, per-environment secrets, serialised deploys, bounded readiness polling, post-deploy smoke test
-- The production image builds, runs as UID 65532, and contains no shell — asserted in CI
+Each deploy runs `ratiba-migrate deploy` as a Railway pre-deploy step — schema
+migrations followed by the idempotent demo dataset — from the same image that
+then serves traffic. If it fails, the release is aborted and the previous
+version keeps serving.
 
-What a human with account access must do (roughly 20 minutes, exact commands in
-[docs/deployment.md](docs/deployment.md#first-deployment)):
+Verified against the live deployments: `/readyz` reports ready with a healthy
+database in all three; the read-only smoke suite passes 17/17 against
+production; the full book → conflict → idempotent retry → reschedule → cancel
+lifecycle passes 27/27 against development and staging; and `GET /metrics`
+returns `401` on production without a bearer token, which is the fail-closed
+configuration rule doing its job in the real environment.
 
-1. Create the Railway project with `development`, `staging` and `production` environments
-2. Add a PostgreSQL service to **each** environment
-3. Create three project-scoped Railway tokens, one per environment
-4. Create the three matching GitHub Environments, each with the secret `RAILWAY_TOKEN` and the variables `RAILWAY_SERVICE` and `PUBLIC_URL`
-5. Push `dev` and confirm the deploy, then promote through `staging` to `main`
-
-The `gh` CLI on this machine is not authenticated and no Railway credentials
-were available, so none of this could be executed or verified here.
+Full setup, rollback and teardown procedure: [docs/deployment.md](docs/deployment.md).
 
 ---
 

@@ -9,7 +9,7 @@
   "deploy": {
     "startCommand": "/usr/local/bin/ratiba-api",
 
-    "preDeployCommand": ["/usr/local/bin/ratiba-migrate up"],
+    "preDeployCommand": ["/usr/local/bin/ratiba-migrate deploy"],
 
     "healthcheckPath": "/readyz",
     "healthcheckTimeout": 120,

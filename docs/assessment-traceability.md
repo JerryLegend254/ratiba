@@ -73,19 +73,19 @@ Status: ✅ done and verified · ⚠️ configured but not executed · ❌ not d
 
 | Requirement | Status | Detail |
 |---|---|---|
-| Deployed to a cloud provider | ❌ | **Not executed.** No Railway credentials were available. [What remains](deployment.md#first-deployment) |
-| Reachable at a public URL | ❌ | No URL is claimed anywhere in this repository |
-| Deployment configured | ⚠️ | [`railway.json`](../railway.json): Dockerfile builder, pre-deploy migration, `/readyz` health check, drain and restart policy |
+| Deployed to a cloud provider | ✅ | Railway, three isolated environments each with its own PostgreSQL |
+| Reachable at a public URL | ✅ | https://ratiba-api-production.up.railway.app |
+| Deployment configured | ✅ | [`railway.json`](../railway.json): Dockerfile builder, pre-deploy migration, `/readyz` health check, drain and restart policy |
 | **CI runs the test suite on every pull request** | ✅ | [`ci.yml`](../.github/workflows/ci.yml) — `on: pull_request`. 7 parallel jobs |
 | **Automatic deploy when a PR is merged into a designated branch** | ⚠️ | [`deploy.yml`](../.github/workflows/deploy.yml) — `on: push` to `dev`/`staging`/`main`. Merging a PR *is* a push; GitHub has no separate "merged" event |
-| README states the public URL | ✅ | States plainly that it is not deployed, rather than inventing one |
+| README states the public URL | ✅ | https://ratiba-api-production.up.railway.app, in the status table |
 | README states which branch triggers a deploy, and how | ✅ | [README — Branch → environment mapping](../README.md#branch--environment-mapping) |
 | README describes what the pipeline does | ✅ | [README — CI/CD](../README.md#cicd) with a flow diagram |
 
-**Honest summary:** everything that could be built and verified without account
-access was. The pipeline definitions and Railway configuration are written and
-reviewed but have never run, and the documentation says so in every place it
-could matter.
+**Honest summary:** all three environments are live and verified. The one thing
+not yet observed end to end is a CI-*driven* deploy — the environments were
+provisioned and first-deployed from a workstation, so the next push to a
+protected branch is the first time the workflow itself does the deploying.
 
 ---
 
@@ -105,7 +105,7 @@ could matter.
 | Item | Status |
 |---|---|
 | Link to a public GitHub/GitLab repository | ⚠️ Push required before submission |
-| Link to the deployed, running application | ❌ Not deployed |
+| Link to the deployed, running application | ✅ https://ratiba-api-production.up.railway.app |
 | README covering design decisions | ✅ |
 | README covering how to run locally | ✅ Verified from a clean checkout — [onboarding rehearsal](onboarding-rehearsal.md) |
 | README covering the CI/CD setup | ✅ |
