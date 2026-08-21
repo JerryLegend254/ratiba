@@ -1,0 +1,24 @@
+# Prometheus configuration for the local observability profile.
+
+global:
+  scrape_interval: 10s
+  evaluation_interval: 15s
+  external_labels:
+    environment: local
+
+scrape_configs:
+  - job_name: ratiba-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8080"]
+        labels:
+          service: ratiba-api
+    # Locally METRICS_AUTH_TOKEN is unset so no credential is needed. In a
+    # deployment where it is set, add:
+    #   authorization:
+    #     type: Bearer
+    #     credentials_file: /etc/prometheus/metrics-token
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

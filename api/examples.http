@@ -1,0 +1,424 @@
+### Ratiba — runnable request collection
+#
+# Works with the VS Code REST Client extension, JetBrains HTTP Client, and
+# `curl` via any .http runner. Contains no secrets.
+#
+# Walks the complete lifecycle: discover → check availability → book →
+# retry safely → list → reschedule → cancel, plus every interesting failure.
+#
+# Before you start:
+#   cp .env.example .env && docker compose up --build
+#
+# The IDs below are the deterministic seed data, so they work on any fresh
+# instance with no lookup step.
+
+@baseUrl = http://localhost:8080
+
+# Dr. Amina Wanjiru — General Practice, Africa/Nairobi
+# Mon-Fri 09:00-13:00 and 14:00-17:00 local
+@doctorId = 7f3c0a1e-1111-4a10-9c01-000000000001
+
+# Dr. Samuel Kiptoo — Physiotherapy, Europe/London (observes DST)
+@londonDoctorId = 7f3c0a1e-1111-4a10-9c01-000000000005
+
+# Grace Achieng — active
+@patientId = 9b2d5e40-2222-4b20-8d02-000000000001
+
+# Daniel Kariuki — deactivated, for the patient_inactive path
+@inactivePatientId = 9b2d5e40-2222-4b20-8d02-000000000006
+
+# A Monday, when every seeded doctor works. Change if it has passed.
+@date = 2026-09-07
+
+# 09:00 Nairobi = 06:00 UTC
+@slot = 2026-09-07T06:00:00Z
+@laterSlot = 2026-09-07T07:00:00Z
+
+
+###############################################################################
+# 1. Orientation
+###############################################################################
+
+### Service info — build, environment, endpoint list
+GET {{baseUrl}}/
+
+### Readiness — is the database reachable?
+GET {{baseUrl}}/readyz
+
+### Liveness — process only, never touches the database
+GET {{baseUrl}}/livez
+
+### The full error catalogue
+GET {{baseUrl}}/problems
+
+### One error code explained
+GET {{baseUrl}}/problems/slot_unavailable
+
+### The OpenAPI contract, embedded in the running binary
+GET {{baseUrl}}/openapi.yaml
+
+
+###############################################################################
+# 2. Discover doctors and patients
+###############################################################################
+
+### List doctors
+GET {{baseUrl}}/doctors
+
+### One doctor
+GET {{baseUrl}}/doctors/{{doctorId}}
+
+### List patients
+GET {{baseUrl}}/patients
+
+
+###############################################################################
+# 3. Availability
+###############################################################################
+
+### Free slots on a working day
+# Expect 14 slots: eight in 09:00-13:00, six in 14:00-17:00.
+# Every slot returned here is bookable by construction.
+GET {{baseUrl}}/doctors/{{doctorId}}/availability?date={{date}}
+
+### A different timezone — note starts_at_local carries a different offset
+GET {{baseUrl}}/doctors/{{londonDoctorId}}/availability?date={{date}}
+
+### A non-working day → 200 with an empty list, not an error
+GET {{baseUrl}}/doctors/{{doctorId}}/availability?date=2026-09-13
+
+### Missing date → 400 invalid_query_parameter
+GET {{baseUrl}}/doctors/{{doctorId}}/availability
+
+### A date that does not exist → 400
+# Go's parser would normalise 2026-02-30 into 2026-03-02; that is rejected.
+GET {{baseUrl}}/doctors/{{doctorId}}/availability?date=2026-02-30
+
+### Malformed UUID → 400 invalid_path_parameter, NOT 404
+GET {{baseUrl}}/doctors/not-a-uuid/availability?date={{date}}
+
+### Unknown doctor → 404 doctor_not_found
+GET {{baseUrl}}/doctors/00000000-0000-4000-8000-0000000000ff/availability?date={{date}}
+
+
+###############################################################################
+# 4. Booking
+###############################################################################
+
+### Book a slot → 201, with a Location header
+# Copy the "id" from the response into @appointmentId below.
+POST {{baseUrl}}/appointments
+Content-Type: application/json
+
+{
+  "doctor_id": "{{doctorId}}",
+  "patient_id": "{{patientId}}",
+  "starts_at": "{{slot}}"
+}
+
+### Paste the created appointment's id here
+@appointmentId = REPLACE_WITH_ID_FROM_THE_RESPONSE_ABOVE
+
+### Book the same slot again → 409 slot_unavailable
+# This is the invariant working. Two patients can never hold one slot.
+POST {{baseUrl}}/appointments
+Content-Type: application/json
+
+{
+  "doctor_id": "{{doctorId}}",
+  "patient_id": "9b2d5e40-2222-4b20-8d02-000000000002",
+  "starts_at": "{{slot}}"
+}
+
+### The same instant with a different doctor → 201
+# Slots are per-doctor, so this is fine.
+POST {{baseUrl}}/appointments
+Content-Type: application/json
+
+{
+  "doctor_id": "{{londonDoctorId}}",
+  "patient_id": "{{patientId}}",
+  "starts_at": "{{slot}}"
+}
+
+
+###############################################################################
+# 5. Idempotency — the retry story
+###############################################################################
+
+### Book with an Idempotency-Key → 201
+POST {{baseUrl}}/appointments
+Content-Type: application/json
+Idempotency-Key: demo-key-0000000001
+
+{
+  "doctor_id": "{{doctorId}}",
+  "patient_id": "{{patientId}}",
+  "starts_at": "2026-09-07T08:00:00Z"
+}
+
+### Send it again → 201 with the SAME id and Idempotency-Replayed: true
+# This is what makes a retry after a network timeout safe.
+POST {{baseUrl}}/appointments
+Content-Type: application/json
+Idempotency-Key: demo-key-0000000001
+
+{
+  "doctor_id": "{{doctorId}}",
+  "patient_id": "{{patientId}}",
+  "starts_at": "2026-09-07T08:00:00Z"
+}
+
+### Same key, different payload → 409 idempotency_key_reuse
+# Catches a client bug rather than silently booking something unintended.
+POST {{baseUrl}}/appointments
+Content-Type: application/json
+Idempotency-Key: demo-key-0000000001
+
+{
+  "doctor_id": "{{doctorId}}",
+  "patient_id": "{{patientId}}",
+  "starts_at": "2026-09-07T09:00:00Z"
+}
+
+### A key that is too short → 400 invalid_idempotency_key
+POST {{baseUrl}}/appointments
+Content-Type: application/json
+Idempotency-Key: short
+
+{
+  "doctor_id": "{{doctorId}}",
+  "patient_id": "{{patientId}}",
+  "starts_at": "{{laterSlot}}"
+}
+
+
+###############################################################################
+# 6. Booking rejections — each has its own stable code
+###############################################################################
+
+### Misaligned start → 422 slot_not_aligned
+POST {{baseUrl}}/appointments
+Content-Type: application/json
+
+{
+  "doctor_id": "{{doctorId}}",
+  "patient_id": "{{patientId}}",
+  "starts_at": "2026-09-07T06:15:00Z"
+}
+
+### Outside working hours → 422 slot_outside_working_hours
+# 20:00 UTC is 23:00 in Nairobi.
+POST {{baseUrl}}/appointments
+Content-Type: application/json
+
+{
+  "doctor_id": "{{doctorId}}",
+  "patient_id": "{{patientId}}",
+  "starts_at": "2026-09-07T20:00:00Z"
+}
+
+### Inside the lunch gap → 422 slot_outside_working_hours
+# 10:30 UTC is 13:30 Nairobi, between the two sessions.
+POST {{baseUrl}}/appointments
+Content-Type: application/json
+
+{
+  "doctor_id": "{{doctorId}}",
+  "patient_id": "{{patientId}}",
+  "starts_at": "2026-09-07T10:30:00Z"
+}
+
+### A day the doctor does not work → 422 doctor_not_working_on_date
+POST {{baseUrl}}/appointments
+Content-Type: application/json
+
+{
+  "doctor_id": "{{doctorId}}",
+  "patient_id": "{{patientId}}",
+  "starts_at": "2026-09-13T06:00:00Z"
+}
+
+### In the past → 422 slot_in_past
+POST {{baseUrl}}/appointments
+Content-Type: application/json
+
+{
+  "doctor_id": "{{doctorId}}",
+  "patient_id": "{{patientId}}",
+  "starts_at": "2020-01-06T06:00:00Z"
+}
+
+### An inactive patient → 422 patient_inactive
+POST {{baseUrl}}/appointments
+Content-Type: application/json
+
+{
+  "doctor_id": "{{doctorId}}",
+  "patient_id": "{{inactivePatientId}}",
+  "starts_at": "{{laterSlot}}"
+}
+
+### Unknown doctor → 404 doctor_not_found
+POST {{baseUrl}}/appointments
+Content-Type: application/json
+
+{
+  "doctor_id": "00000000-0000-4000-8000-0000000000ff",
+  "patient_id": "{{patientId}}",
+  "starts_at": "{{laterSlot}}"
+}
+
+
+###############################################################################
+# 7. Malformed requests — strict decoding
+###############################################################################
+
+### A typo in a field name → 400 unknown_field
+# Most APIs would ignore "start_at" and book the zero time. This one refuses.
+POST {{baseUrl}}/appointments
+Content-Type: application/json
+
+{
+  "doctor_id": "{{doctorId}}",
+  "patient_id": "{{patientId}}",
+  "start_at": "{{laterSlot}}"
+}
+
+### Malformed JSON → 400 malformed_json
+POST {{baseUrl}}/appointments
+Content-Type: application/json
+
+{ "doctor_id":
+
+### Two JSON documents in one body → 400 trailing_content
+POST {{baseUrl}}/appointments
+Content-Type: application/json
+
+{"doctor_id":"{{doctorId}}","patient_id":"{{patientId}}","starts_at":"{{laterSlot}}"}{"extra":true}
+
+### Wrong content type → 415 unsupported_media_type
+POST {{baseUrl}}/appointments
+Content-Type: text/plain
+
+doctor_id={{doctorId}}
+
+### A timestamp with no offset → 422 validation_failed
+# Rejected rather than guessed at: every guess books the wrong hour when wrong.
+POST {{baseUrl}}/appointments
+Content-Type: application/json
+
+{
+  "doctor_id": "{{doctorId}}",
+  "patient_id": "{{patientId}}",
+  "starts_at": "2026-09-07T09:00:00"
+}
+
+
+###############################################################################
+# 8. Reading appointments
+###############################################################################
+
+### One appointment
+GET {{baseUrl}}/appointments/{{appointmentId}}
+
+### A patient's upcoming appointments — future active only, chronological
+GET {{baseUrl}}/patients/{{patientId}}/appointments
+
+### Paged
+GET {{baseUrl}}/patients/{{patientId}}/appointments?limit=2&offset=0
+
+### An out-of-range limit → 400, rejected rather than silently clamped
+GET {{baseUrl}}/patients/{{patientId}}/appointments?limit=5000
+
+
+###############################################################################
+# 9. Rescheduling
+###############################################################################
+
+### Move to a different slot → 200, same id, new times
+# The old slot is released and the new one claimed in a single statement.
+PATCH {{baseUrl}}/appointments/{{appointmentId}}/reschedule
+Content-Type: application/json
+
+{
+  "starts_at": "{{laterSlot}}"
+}
+
+### Confirm the original slot is free again
+GET {{baseUrl}}/doctors/{{doctorId}}/availability?date={{date}}
+
+### Move to the slot it already occupies → 409 reschedule_same_slot
+# Not a silent 200: that would append an audit event for a move that never
+# happened. See docs/adr/0006-reschedule-semantics.md
+PATCH {{baseUrl}}/appointments/{{appointmentId}}/reschedule
+Content-Type: application/json
+
+{
+  "starts_at": "{{laterSlot}}"
+}
+
+### Move onto a taken slot → 409, and the appointment stays where it was
+PATCH {{baseUrl}}/appointments/{{appointmentId}}/reschedule
+Content-Type: application/json
+
+{
+  "starts_at": "2026-09-07T08:00:00Z"
+}
+
+### Verify it did not move
+GET {{baseUrl}}/appointments/{{appointmentId}}
+
+
+###############################################################################
+# 10. Cancelling
+###############################################################################
+
+### Cancel with a reason → 200, and the slot is immediately bookable again
+PATCH {{baseUrl}}/appointments/{{appointmentId}}/cancel
+Content-Type: application/json
+
+{
+  "reason": "Patient is travelling that week"
+}
+
+### Cancel again → 409 appointment_already_cancelled
+# A retry cannot overwrite the original reason and timestamp.
+PATCH {{baseUrl}}/appointments/{{appointmentId}}/cancel
+Content-Type: application/json
+
+{
+  "reason": "trying again"
+}
+
+### A blank reason → 422 with a field violation naming "reason"
+PATCH {{baseUrl}}/appointments/{{appointmentId}}/cancel
+Content-Type: application/json
+
+{
+  "reason": "   "
+}
+
+### The slot is free again
+GET {{baseUrl}}/doctors/{{doctorId}}/availability?date={{date}}
+
+### The cancelled appointment is retained, not deleted
+GET {{baseUrl}}/appointments/{{appointmentId}}
+
+
+###############################################################################
+# 11. Operational
+###############################################################################
+
+### Metrics — add a bearer token if METRICS_AUTH_TOKEN is set
+GET {{baseUrl}}/metrics
+
+### Unknown route → 404 in the same problem+json format as everything else
+GET {{baseUrl}}/no-such-route
+
+### Wrong method on a known path → 405
+DELETE {{baseUrl}}/appointments
+
+### Send your own request ID and see it echoed back
+GET {{baseUrl}}/livez
+X-Request-Id: my-correlation-id-123
