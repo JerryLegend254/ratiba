@@ -4,6 +4,12 @@
 # linter here has caught, or would catch, a class of bug that matters in this
 # codebase. Linters that mostly produce style noise are off, because a lint
 # suite people learn to ignore protects nothing.
+#
+# Schema v2. This is not a cosmetic distinction: v2 rejects a v1 file rather
+# than ignoring the unknown keys, so `linters-settings`, `issues.exclude-rules`
+# and `issues.exclude-dirs` all had to move. Run `make lint-config` after any
+# edit — a config that fails validation fails the whole Lint job before a single
+# file is examined.
 
 version: "2"
 
@@ -50,70 +56,85 @@ linters:
     - tparallel       # t.Parallel() misuse silently serialises the suite
     - thelper         # helpers that forget t.Helper() report the wrong line
 
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-    check-blank: false
-    exclude-functions:
-      # Deliberately ignored: a rollback after a successful commit is a no-op,
-      # and a failed rollback is unactionable — the transaction is finished
-      # either way and the real error is already being returned.
-      - (github.com/jackc/pgx/v5.Tx).Rollback
+  # v1 called this top-level `linters-settings`.
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+      exclude-functions:
+        # Deliberately ignored: a rollback after a successful commit is a no-op,
+        # and a failed rollback is unactionable — the transaction is finished
+        # either way and the real error is already being returned.
+        - (github.com/jackc/pgx/v5.Tx).Rollback
 
-  govet:
-    enable-all: true
-    disable:
-      # Struct field alignment is a micro-optimisation that would force field
-      # ordering to fight readability across the whole codebase.
-      - fieldalignment
+    govet:
+      enable-all: true
+      disable:
+        # Struct field alignment is a micro-optimisation that would force field
+        # ordering to fight readability across the whole codebase.
+        - fieldalignment
 
-  gosec:
-    excludes:
-      # G104 duplicates errcheck.
-      - G104
+        # `shadow` flags `if err := f(); err != nil` whenever an `err` already
+        # exists in the enclosing scope — the single most common statement shape
+        # in Go, and the one the language scopes to the `if` precisely so it is
+        # safe. It found 16 of these here and zero real defects; each was
+        # inspected, including the three in non-test code. Vanilla `go vet`
+        # leaves it off by default for the same reason. Keeping it on would mean
+        # 16 permanent suppressions teaching everyone to skim lint output.
+        - shadow
 
-  revive:
+    gosec:
+      excludes:
+        # G104 duplicates errcheck.
+        - G104
+
+    revive:
+      rules:
+        - name: exported
+          # Every exported symbol needs a doc comment; this codebase is meant to
+          # be readable by someone who has never seen it.
+          arguments: [checkPrivateReceivers, disableStutteringCheck]
+        - name: package-comments
+        - name: indent-error-flow
+        - name: errorf
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: time-naming
+        - name: var-declaration
+        - name: unexported-return
+        - name: blank-imports
+        - name: range
+        - name: receiver-naming
+        - name: increment-decrement
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+
+    staticcheck:
+      checks: ["all"]
+
+  # v1 called these `issues.exclude-rules` and `issues.exclude-dirs`.
+  exclusions:
+    # Skip files carrying a "Code generated ... DO NOT EDIT." header. sqlc emits
+    # one, so this covers the generated package on its own; `paths` below states
+    # it explicitly rather than relying on a header we do not control.
+    generated: lax
+
+    paths:
+      # Generated code is not ours to lint or to document.
+      - internal/postgres/sqlcgen
+
     rules:
-      - name: exported
-        # Every exported symbol needs a doc comment; this codebase is meant to
-        # be readable by someone who has never seen it.
-        arguments: [checkPrivateReceivers, disableStutteringCheck]
-      - name: package-comments
-      - name: indent-error-flow
-      - name: errorf
-      - name: context-as-argument
-      - name: context-keys-type
-      - name: time-naming
-      - name: var-declaration
-      - name: unexported-return
-      - name: blank-imports
-      - name: range
-      - name: receiver-naming
-      - name: increment-decrement
-      - name: error-return
-      - name: error-strings
-      - name: error-naming
+      # Tests may use weak randomness, ignore some errors in setup, and are
+      # allowed longer functions than production code.
+      - path: _test\.go
+        linters: [gosec, errcheck, unparam, contextcheck]
 
-  staticcheck:
-    checks: ["all"]
+      # The migrate command legitimately exits the process.
+      - path: cmd/migrate/
+        text: "deep-exit"
 
 issues:
   # Report everything rather than the default first-few-per-linter.
   max-issues-per-linter: 0
   max-same-issues: 0
-  exclude-rules:
-    # Generated code is not ours to lint or to document.
-    - path: internal/postgres/sqlcgen/
-      linters: [revive, staticcheck, unused, gosec, errcheck, unparam]
-
-    # Tests may use weak randomness, ignore some errors in setup, and are
-    # allowed longer functions than production code.
-    - path: _test\.go
-      linters: [gosec, errcheck, unparam, contextcheck]
-
-    # The migrate command legitimately exits the process.
-    - path: cmd/migrate/
-      text: "deep-exit"
-
-  exclude-dirs:
-    - internal/postgres/sqlcgen

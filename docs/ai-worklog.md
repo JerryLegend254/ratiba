@@ -280,6 +280,50 @@ which were only written.
 
 ---
 
+## 2026-08-21 — Three gates that were never running
+
+**Task.** Get the first CI-driven deploy to succeed.
+
+**What surfaced.** Three defects, each of which had been sitting in a green-
+looking repository because the thing meant to catch them was itself broken.
+
+| Defect | Why nobody noticed |
+|---|---|
+| `join(needs.*.result, " ")` in the CI gate | The expression language allows only single quotes. Valid YAML, invalid expression — GitHub voided the whole workflow and failed every run in **0 seconds** with no job logs. The only visible symptom was the API listing the workflow's name as its file path, because it never parsed far enough to read `name:` |
+| `@railway/cli@4.5.3` pinned in the deploy job | Railway changed the project-token exchange after that release. A valid token is rejected with `Unauthorized. Please login with railway login` — a message that accuses the secret, so the instinct is to rotate it, which changes nothing |
+| `.golangci.yml` still on the v1 schema | It declared `version: "2"` but kept `linters-settings` and `issues.exclude-*`. v2 *rejects* an unknown key rather than ignoring it, so the Lint job died during config validation and had never linted a single file |
+
+**AI contribution.** Diagnosis and the fixes. The workflow bug was found with
+`actionlint` after hand-reading and a YAML parser both passed the file — the
+lesson being that "valid YAML" and "valid workflow" are different claims, and
+only the second one matters.
+
+**Where AI was wrong.** While migrating the lint config, the reasoning for
+disabling `govet`'s `shadow` check was written as a comment — and the
+`- shadow` entry itself was never added. `golangci-lint` reported the same 16
+findings, and the natural next move was to blame caching or a schema quirk.
+Parsing the file and printing the resulting `govet` map showed
+`disable: ['fieldalignment']` — the justification existed, the change did not. A
+comment explaining a change is not the change.
+
+**Verification.** `golangci-lint config verify` passes and `golangci-lint run
+./...` reports **0 issues** against the same 2.12.2 that CI pins. The 16 `shadow`
+findings were each inspected before being disabled, including the three in
+non-test code; all were the canonical `if err := f(); err != nil` form, which Go
+scopes to the `if` precisely so it is safe. Vanilla `go vet` leaves `shadow` off
+by default for the same reason. The Railway CLI floor was established by running
+one token against both versions: 4.5.3 rejects it, 4.33.0 authenticates.
+
+**Still unproven.** A deploy that runs end to end from CI. Re-running the failed
+jobs replays the old workflow file, so the fix cannot be tested by re-run — the
+first push carrying these commits is the real test.
+
+**Guards added.** `make verify-workflows` (actionlint) and `make lint-config`,
+both wired into the pipeline. Neither is a complete defence: a workflow broken
+badly enough prevents the job that would have caught it from starting at all.
+
+---
+
 ## Division of work
 
 | Kind of work | Where AI led | Where I led |
@@ -308,3 +352,5 @@ Nothing in this project was accepted because it looked right:
 | Secrets are not logged | A test asserts it; confirmed in real log output |
 | The contract matches the code | A test walks the router against the OpenAPI document |
 | Coverage figures | An actual `make coverage` run |
+| The lint suite is clean | `golangci-lint run ./...` → 0 issues, on the same 2.12.2 CI pins |
+| The workflows are valid | `actionlint` over `.github/workflows/`, after a hand-read and a YAML parser both missed a fatal error |

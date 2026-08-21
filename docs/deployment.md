@@ -1,9 +1,14 @@
 # Deployment
 
-**Current status: not deployed.** Everything below is configured as code and
-verified locally. The steps in [First deployment](#first-deployment) require
-Railway and GitHub account access, which was not available on the machine this
-was built on. No public URL is claimed anywhere in this repository.
+**Current status: deployed.** All three environments are live on Railway, each
+with its own PostgreSQL, its own secrets, and its own project-scoped deploy
+token.
+
+| Environment | Branch | URL |
+|---|---|---|
+| production | `main` | https://ratiba-api-production.up.railway.app |
+| staging | `staging` | https://ratiba-api-staging.up.railway.app |
+| development | `dev` | https://ratiba-api-development.up.railway.app |
 
 This document separates, explicitly:
 
@@ -223,6 +228,22 @@ Create one **project-scoped** token per environment (Project Settings → Tokens
 A project token is already bound to one environment, so a workflow using it
 cannot deploy to the wrong one. Do **not** use an account-wide token.
 
+Pass it as `RAILWAY_TOKEN`. The account-wide variable is `RAILWAY_API_TOKEN`;
+they are not interchangeable.
+
+> **The CLI must be 4.33.0 or newer.** Railway changed how project tokens are
+> exchanged, and older CLIs — 4.5.3 was pinned here — reject a perfectly valid
+> project token with:
+>
+> ```
+> Unauthorized. Please login with `railway login`
+> ```
+>
+> That message points at the token, so the natural response is to rotate it,
+> which changes nothing. If a freshly minted token authenticates locally but the
+> same token fails in CI, compare `railway --version` on both sides before
+> touching the secret.
+
 ### 5. GitHub Environments
 
 Create `development`, `staging` and `production` (Settings → Environments).
@@ -332,9 +353,10 @@ first.
 | Seeding is idempotent | **Verified** — run twice, same result |
 | Graceful shutdown drains and exits 0 | **Verified** — observed in container logs |
 | Smoke script passes against a real container | **Verified** — 27/27 |
-| `railway.json` schema and semantics | **Written to Railway's documented schema; not executed** |
-| GitHub Actions workflows | **Written; not executed** — no authenticated GitHub access |
-| Railway environments, databases, tokens | **Not created** — no Railway credentials |
-| Public URL | **Does not exist** |
-
-Nothing in the "not" column is claimed as done anywhere else in this repository.
+| `railway.json`, including the pre-deploy migration | **Verified in all three environments** — logs show the advisory lock, migration to version 3, and seed |
+| Three isolated environments, databases and tokens | **Created and verified** |
+| Public URLs | **Live** — `/readyz` healthy in all three |
+| Read-only smoke against production | **17/17** |
+| Full write lifecycle against development and staging | **27/27** |
+| `/metrics` returns 401 in production without a token | **Verified** |
+| GitHub Actions deploy workflow | **Not yet observed end to end** — the environments were provisioned and first-deployed from a workstation. The next push to a protected branch is the first CI-driven deploy. |
