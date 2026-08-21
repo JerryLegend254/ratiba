@@ -12,6 +12,7 @@ GO_VERSION := $(shell awk '/^go /{print $$2}' go.mod)
 # cannot be a lint-version difference.
 SQLC_VERSION        := v1.31.1
 GOLANGCI_VERSION    := v2.12.2
+ACTIONLINT_VERSION  := v1.7.7
 GOVULNCHECK_VERSION := latest
 
 # Business-critical packages. Coverage is enforced on these, not on the whole
@@ -171,8 +172,20 @@ verify-migrations: ## Check migration filenames are sequential and well-formed
 verify-docs: ## Check that every relative link in the documentation resolves
 	@bash scripts/verify-docs.sh
 
+.PHONY: verify-workflows
+verify-workflows: ## Type-check the GitHub Actions workflows and their expressions
+	@command -v actionlint >/dev/null 2>&1 \
+		|| go install github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
+	@actionlint .github/workflows/*.yml
+	@echo "==> Workflows are valid"
+
+.PHONY: lint-config
+lint-config: ## Validate .golangci.yml against the schema of the pinned version
+	@golangci-lint config verify
+	@echo "==> Lint configuration is valid"
+
 .PHONY: lint
-lint: ## Run golangci-lint
+lint: lint-config ## Run golangci-lint
 	golangci-lint run ./...
 
 .PHONY: vulncheck

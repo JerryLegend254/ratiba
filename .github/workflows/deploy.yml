@@ -165,7 +165,13 @@ jobs:
       - name: Install the Railway CLI
         # Pinned: an unpinned CLI would let a new release change deployment
         # behaviour with no change to this repository.
-        run: npm install -g @railway/cli@4.5.3
+        #
+        # 4.33.0 is the floor for project-token authentication, not a routine
+        # bump. Railway changed how project tokens are exchanged; 4.5.3 rejects
+        # a valid token with "Unauthorized. Please login with `railway login`",
+        # which reads like a missing secret and is not. Verified by running the
+        # same token against both versions.
+        run: npm install -g @railway/cli@4.33.0
 
       - name: Deploy
         env:

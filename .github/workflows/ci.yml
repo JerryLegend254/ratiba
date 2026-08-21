@@ -81,6 +81,18 @@ jobs:
       - name: Verify documentation links
         run: make verify-docs
 
+      - name: Verify the workflows themselves
+        # actionlint type-checks the expression language, which plain YAML
+        # validation cannot: `join(needs.*.result, " ")` is well-formed YAML but
+        # an invalid expression, and GitHub responds by failing the run in zero
+        # seconds with no job logs to debug from.
+        #
+        # This gate only helps for a workflow that still parses. A file broken
+        # badly enough stops this job from running at all, so `make
+        # verify-workflows` before pushing a workflow change remains the real
+        # defence.
+        run: make verify-workflows
+
   lint:
     name: Lint
     runs-on: ubuntu-24.04
@@ -338,8 +350,13 @@ jobs:
     steps:
       - name: Fail if any required job did not succeed
         # `needs` alone would let a skipped or cancelled job pass this gate.
+        #
+        # The separator must be single-quoted: the expression language accepts
+        # only single quotes for string literals, and a double-quoted one is a
+        # parse error that invalidates the entire workflow file — GitHub then
+        # fails the run in zero seconds without producing a single job log.
         run: |
-          results='${{ join(needs.*.result, " ") }}'
+          results="${{ join(needs.*.result, ' ') }}"
           echo "Job results: $results"
           for result in $results; do
             if [ "$result" != "success" ]; then

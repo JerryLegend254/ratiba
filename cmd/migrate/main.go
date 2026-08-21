@@ -57,6 +57,7 @@ Usage:
   ratiba-migrate <command> [flags]
 
 Commands:
+  deploy             Apply migrations, then refresh the demo dataset.
   up                 Apply all pending migrations.
   up-by-one          Apply the next pending migration only.
   down               Roll back the most recent migration.
@@ -111,6 +112,23 @@ func run() error {
 		return seed(ctx, pool, logger)
 	case "purge-idempotency":
 		return purgeIdempotency(ctx, pool, logger)
+	case "deploy":
+		// One command, because the production image has no shell to chain two
+		// with. Run as Railway's pre-deploy step: migrate, then refresh the
+		// demo dataset so a fresh environment is immediately usable.
+		//
+		// Seeding on every deploy is a deliberate choice for this assessment,
+		// where every environment holds fictitious demo data and a reviewer
+		// must be able to call the API without first being handed identifiers.
+		// It is safe to repeat — doctors and patients are upserted by primary
+		// key and appointments are never touched — but a service holding real
+		// patient data would run migrations only and seed nothing.
+		if err := withAdvisoryLock(ctx, pool, logger, func(ctx context.Context) error {
+			return runGoose(ctx, databaseURL, "up", logger)
+		}); err != nil {
+			return err
+		}
+		return seed(ctx, pool, logger)
 	}
 
 	return withAdvisoryLock(ctx, pool, logger, func(ctx context.Context) error {
