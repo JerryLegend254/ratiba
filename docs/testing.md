@@ -15,7 +15,7 @@
         │  policy · service · schedule · dates │
         └──────────────────────────────────────┘
 
-278 passing assertions in total (counting subtests), measured on 2026-08-19.
+276 passing assertions in total (counting subtests), measured on 2026-08-21.
 ```
 
 The split is decided by **what a layer can honestly prove**, not by convention.
@@ -261,19 +261,19 @@ make coverage        # enforces the gate
 make coverage-html   # writes coverage.html
 ```
 
-### Measured — 2026-08-19
+### Measured — 2026-08-21
 
 | Package | Coverage |
 |---|---|
 | `internal/patient` | 100.0% |
 | `internal/doctor` | 98.9% |
-| `internal/platform/config` | 91.3% |
+| `internal/platform/config` | 88.3% |
 | `internal/platform/apperror` | 87.5% |
 | `internal/appointment` | 84.6% |
 | `internal/platform/calendar` | 80.5% |
 | `internal/transport/http` | 72.8% |
 | `internal/postgres` | 65.7% |
-| **Total** | **68.4%** |
+| **Total** | **67.7%** |
 
 ### The policy
 
