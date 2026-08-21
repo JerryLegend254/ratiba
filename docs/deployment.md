@@ -228,6 +228,22 @@ Create one **project-scoped** token per environment (Project Settings → Tokens
 A project token is already bound to one environment, so a workflow using it
 cannot deploy to the wrong one. Do **not** use an account-wide token.
 
+Pass it as `RAILWAY_TOKEN`. The account-wide variable is `RAILWAY_API_TOKEN`;
+they are not interchangeable.
+
+> **The CLI must be 4.33.0 or newer.** Railway changed how project tokens are
+> exchanged, and older CLIs — 4.5.3 was pinned here — reject a perfectly valid
+> project token with:
+>
+> ```
+> Unauthorized. Please login with `railway login`
+> ```
+>
+> That message points at the token, so the natural response is to rotate it,
+> which changes nothing. If a freshly minted token authenticates locally but the
+> same token fails in CI, compare `railway --version` on both sides before
+> touching the secret.
+
 ### 5. GitHub Environments
 
 Create `development`, `staging` and `production` (Settings → Environments).
