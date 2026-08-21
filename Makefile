@@ -32,6 +32,8 @@ DATABASE_URL ?= postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:$(POS
 TEST_DATABASE_URL ?= postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:$(POSTGRES_PORT)/$(POSTGRES_DB)_test?sslmode=disable
 
 # Exported so the migrate binary and, later, the API can read them.
+API_URL ?= http://localhost:8080
+
 export DATABASE_URL
 export TEST_DATABASE_URL
 export PGPASSWORD = $(POSTGRES_PASSWORD)
@@ -182,6 +184,14 @@ test-db: ## Create the integration test database if it does not exist
 .PHONY: run
 run: ## Run the API against the local database
 	go run ./cmd/api
+
+.PHONY: smoke
+smoke: ## Run a read-only smoke test against a running API
+	@bash scripts/smoke.sh $(API_URL)
+
+.PHONY: smoke-write
+smoke-write: ## Run the full book/reschedule/cancel lifecycle against a running API
+	@bash scripts/smoke.sh $(API_URL) --write
 
 .PHONY: docker-build
 docker-build: ## Build the production image

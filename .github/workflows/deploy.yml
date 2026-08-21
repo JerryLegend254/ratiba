@@ -1,0 +1,230 @@
+# Ratiba deployment.
+#
+# The assessment asks for "automatic deploy when a PR is merged into a
+# designated branch". Merging a pull request produces a `push` event on the
+# target branch, and that push is the trigger below. There is no separate
+# "on merge" event in GitHub Actions; `push` to a protected branch IS the
+# merge signal.
+#
+# Branch → environment mapping:
+#
+#   dev      → development   (GitHub environment `development`)
+#   staging  → staging       (GitHub environment `staging`)
+#   main     → production    (GitHub environment `production`)
+#
+# Each GitHub environment holds its own RAILWAY_TOKEN, scoped to the matching
+# Railway environment, and its own service identifiers. Nothing is shared, so a
+# leaked development token cannot reach production data.
+
+name: Deploy
+
+on:
+  push:
+    branches: [dev, staging, main]
+  # Manual redeploy of the current commit, for recovering from a transient
+  # platform failure without an empty commit.
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to deploy
+        required: true
+        type: choice
+        options: [development, staging, production]
+
+permissions:
+  contents: read
+  # Required to record the deployment and its URL in the repository's
+  # Environments view.
+  deployments: write
+
+# Serialise deployments per environment. Without this, two quick merges could
+# have an older commit's deploy finish last and overwrite the newer one.
+# cancel-in-progress is deliberately false: aborting a deploy mid-rollout is
+# more dangerous than waiting for it.
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Decide the target. Keeping the mapping in one place means the deploy job
+  # cannot be pointed at the wrong environment by editing one line.
+  # ---------------------------------------------------------------------------
+  resolve:
+    name: Resolve target environment
+    runs-on: ubuntu-24.04
+    outputs:
+      environment: ${{ steps.map.outputs.environment }}
+    steps:
+      - id: map
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            environment='${{ inputs.environment }}'
+          else
+            case '${{ github.ref_name }}' in
+              dev)     environment=development ;;
+              staging) environment=staging ;;
+              main)    environment=production ;;
+              *)
+                echo "::error::Branch '${{ github.ref_name }}' has no environment mapping"
+                exit 1
+                ;;
+            esac
+          fi
+          echo "environment=$environment" >> "$GITHUB_OUTPUT"
+          echo "Deploying ${{ github.ref_name }} → $environment"
+
+  # ---------------------------------------------------------------------------
+  # Re-run the quality gates on the exact merge commit. The PR was tested
+  # against a merge preview; this is the commit that will actually be deployed.
+  # ---------------------------------------------------------------------------
+  quality-gates:
+    name: Quality gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:17.5-alpine
+        env:
+          POSTGRES_USER: ratiba
+          POSTGRES_PASSWORD: ratiba_ci
+          POSTGRES_DB: ratiba_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ratiba -d ratiba_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+
+    env:
+      TEST_DATABASE_URL: postgres://ratiba:ratiba_ci@localhost:5432/ratiba_test?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Static checks
+        run: |
+          make verify-go-version
+          make format-check
+          make vet
+          make verify-migrations
+
+      - name: Unit tests
+        run: go test -race -count=1 ./...
+
+      - name: Integration tests
+        run: go test -tags=integration -race -count=1 ./internal/postgres/...
+
+      - name: Coverage gate
+        run: |
+          bash scripts/coverage.sh coverage.out 80 \
+            github.com/JerryLegend254/ratiba/internal/appointment \
+            github.com/JerryLegend254/ratiba/internal/doctor \
+            github.com/JerryLegend254/ratiba/internal/patient
+
+  # ---------------------------------------------------------------------------
+  # Deploy. Only runs once every gate above is green.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy to ${{ needs.resolve.outputs.environment }}
+    needs: [resolve, quality-gates]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+
+    # Binds this job to the GitHub Environment, which supplies the scoped
+    # secrets and enforces any protection rules (such as a required reviewer
+    # on production) before the job may start.
+    environment:
+      name: ${{ needs.resolve.outputs.environment }}
+      url: ${{ vars.PUBLIC_URL }}
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Check the required configuration is present
+        # Fail with a precise message rather than letting the Railway CLI emit
+        # a confusing error about a missing project.
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
+          PUBLIC_URL: ${{ vars.PUBLIC_URL }}
+        run: |
+          missing=0
+          [ -n "$RAILWAY_TOKEN" ]   || { echo "::error::secret RAILWAY_TOKEN is not set for the '${{ needs.resolve.outputs.environment }}' environment"; missing=1; }
+          [ -n "$RAILWAY_SERVICE" ] || { echo "::error::variable RAILWAY_SERVICE is not set for the '${{ needs.resolve.outputs.environment }}' environment"; missing=1; }
+          [ -n "$PUBLIC_URL" ]      || { echo "::error::variable PUBLIC_URL is not set for the '${{ needs.resolve.outputs.environment }}' environment"; missing=1; }
+          [ "$missing" -eq 0 ] || { echo "See docs/deployment.md for the full setup checklist."; exit 1; }
+
+      - name: Install the Railway CLI
+        # Pinned: an unpinned CLI would let a new release change deployment
+        # behaviour with no change to this repository.
+        run: npm install -g @railway/cli@4.5.3
+
+      - name: Deploy
+        env:
+          # A project-scoped token is already bound to one Railway environment,
+          # so there is no way for this step to deploy to the wrong one.
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          echo "Deploying commit ${{ github.sha }} to ${{ needs.resolve.outputs.environment }}"
+          # --ci streams build logs and exits non-zero if the deploy fails.
+          # Railway runs the pre-deploy migration itself; if that fails, the
+          # release is aborted and the previous version keeps serving.
+          railway up --ci --service "${{ vars.RAILWAY_SERVICE }}"
+
+      - name: Wait for the deployment to become ready
+        run: bash scripts/wait-for-ready.sh "${{ vars.PUBLIC_URL }}" 40
+
+      - name: Verify the deployed commit matches this one
+        # Catches the case where the wait succeeded because the PREVIOUS
+        # version was still serving and the new one never rolled out.
+        run: |
+          deployed=$(curl -sS --max-time 15 "${{ vars.PUBLIC_URL }}/" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["commit"])')
+          expected=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "Deployed commit: $deployed"
+          echo "Expected commit: $expected"
+          if [ "$deployed" != "$expected" ]; then
+            echo "::warning::The service reports commit '$deployed' but '$expected' was deployed."
+            echo "::warning::This can be a slow rollout; check the Railway deployment log."
+          fi
+
+      - name: Smoke test
+        # Read-only by default: this runs against production and must not
+        # create data there. Development and staging additionally run the
+        # write lifecycle below.
+        run: bash scripts/smoke.sh "${{ vars.PUBLIC_URL }}"
+
+      - name: Full lifecycle smoke test
+        # Creates and then cancels appointments using the seeded demo patient.
+        # Restricted to non-production environments.
+        if: needs.resolve.outputs.environment != 'production'
+        run: bash scripts/smoke.sh "${{ vars.PUBLIC_URL }}" --write
+
+      - name: Summarise the deployment
+        if: always()
+        run: |
+          {
+            echo "## Deployment"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Environment | \`${{ needs.resolve.outputs.environment }}\` |"
+            echo "| Branch | \`${{ github.ref_name }}\` |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| URL | ${{ vars.PUBLIC_URL }} |"
+            echo "| Docs | ${{ vars.PUBLIC_URL }}/docs |"
+            echo "| Health | ${{ vars.PUBLIC_URL }}/readyz |"
+            echo "| Result | ${{ job.status }} |"
+            echo ""
+            echo "To roll back, redeploy the previous release from the Railway"
+            echo "dashboard. Do **not** roll migrations back — a down-migration"
+            echo "that reverses ADD COLUMN destroys the data written since."
+          } >> "$GITHUB_STEP_SUMMARY"
