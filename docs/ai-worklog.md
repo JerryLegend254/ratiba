@@ -274,9 +274,10 @@ coverage figures come from an actual `make coverage` run, not an estimate.
 
 **Changed from the drafts.** Early versions asserted things that had not been
 verified — a "five-minute setup", and a deployment section written as though the
-service were live. Both were rewritten: the deployment section now states plainly
-that nothing is deployed and lists exactly which artifacts were verified and
-which were only written.
+service were live. Both were rewritten: as of this entry the deployment section
+stated plainly that nothing was deployed yet, and listed exactly which artifacts
+had been verified and which were only written. (The service went live on
+2026-08-21; that document was updated then.)
 
 ---
 

@@ -92,11 +92,15 @@ AI drafted the README, the eight guides, seven ADRs and seven runbooks from the
 decisions already made and the code already written.
 
 The largest correction I made was to **claims**. Early drafts described the
-deployment as if it existed and promised a "five-minute setup". Neither was true.
-The deployment section now says plainly that nothing is deployed and separates
-what was verified from what was only written; the onboarding document records a
-measured time and immediately explains why that number should not be trusted on
-different hardware.
+deployment as if it existed and promised a "five-minute setup". Neither was true
+at the time. The deployment section was rewritten to say plainly that nothing was
+deployed yet, and to separate what had been verified from what had only been
+written; the onboarding document records a measured time and immediately explains
+why that number should not be trusted on different hardware.
+
+The deployment is real now, and the same rule applied to writing it up: every row
+of the *verified vs. not* table in [docs/deployment.md](docs/deployment.md) names
+how that item was actually checked, and the rows that are still unproven say so.
 
 Every number in this repository came from a command that was actually run.
 
@@ -213,11 +217,13 @@ the client received 400 but the access log recorded 200.
 ```
 
 **I deliberately left this bug in the commit history** rather than quietly
-folding the fix into the commit that introduced it. The repository now contains
-a commit that ships the flaw and a later commit that finds and fixes it, with the
-evidence in the message. A history that only ever shows correct code is not a
-history of real work, and the fix is more informative with the failure still
-visible above it.
+folding the fix into the commit that introduced it. The repository contains a
+commit that ships the flaw (`1bdf6ba`) and a later one that finds and fixes it
+(`f055d2b`), and the evidence is in that second diff: the one-line change to the
+recorder, the reasoning written onto the type as a comment, and the 188-line
+`observability_test.go` that fails without the fix. A history that only ever
+shows correct code is not a history of real work, and the fix is more informative
+with the failure still visible above it.
 
 ### The general lesson
 
@@ -314,9 +320,9 @@ an authenticated actor ID goes, and the idempotency scope becomes
 **Keeping the response-recorder bug in the git history.** It would have been
 trivial to fold the fix into the commit that introduced it and present a clean
 record. I chose not to. The commit that ships the flaw and the commit that finds
-it are both in the log, with the reproduction in the message. Work that looks
-like it was right first time is not a useful account of how software actually
-gets built.
+it are both in the log, and the regression test that pins it landed in the same
+diff as the fix. Work that looks like it was right first time is not a useful
+account of how software actually gets built.
 
 ---
 
@@ -335,10 +341,11 @@ reading the diff more carefully.
 
 What made the difference was running the system and reading its real output,
 writing tests that assert properties other than the obvious one, and refusing to
-put a claim in the documentation that had not actually been verified. The
-deployment section says "not deployed" because nothing is deployed. The coverage
-figures come from a real `make coverage` run. There is no public URL in this
-README because there is no public URL.
+put a claim in the documentation that had not actually been verified. The coverage
+figures come from a real `make coverage` run. The public URLs went into the README
+only after `/readyz` answered on all three environments — and for as long as there
+was nothing deployed, the deployment section said "not deployed" rather than
+describing what it was going to be.
 
 That discipline is the part I would bring to a team, and it is not something the
 tooling supplies.
