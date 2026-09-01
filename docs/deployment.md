@@ -359,4 +359,27 @@ first.
 | Read-only smoke against production | **17/17** |
 | Full write lifecycle against development and staging | **27/27** |
 | `/metrics` returns 401 in production without a token | **Verified** |
-| GitHub Actions deploy workflow | **Not yet observed end to end** — the environments were provisioned and first-deployed from a workstation. The next push to a protected branch is the first CI-driven deploy. |
+| GitHub Actions deploy workflow | **Verified end to end** — a push to `dev`, `staging` and `main` each deployed the matching environment, polled `/readyz` and passed its smoke suite. CI is green on all three. |
+| CI on a **pull request** | **Not yet observed** — the `pull_request` trigger is configured, but every run so far was push-triggered, because branches were promoted by direct merge. |
+| Deployed-commit verification | **Configured, not gating** — the step compares the reported commit against the deployed one but emits a warning rather than failing. Railway does not pass the `COMMIT` build-arg through, so the service reports `unknown` and this step warns on every deploy. See below. |
+
+### The deployed version does not identify itself
+
+`GET /` reports `"commit": "unknown"` and `"version": "dev"` in all three
+environments. The Dockerfile declares `ARG COMMIT=unknown` and `ARG VERSION=dev`
+and injects them with `-X main.commit=...` / `-X main.version=...`, but Railway
+builds from source without passing either build-arg, so both keep their defaults.
+
+Two consequences, in increasing order of importance:
+
+1. You cannot tell from the running service which commit it is serving, which is
+   exactly the question worth answering during an incident.
+2. **The deploy workflow's "Verify the deployed commit matches this one" step
+   never fails.** It was written to catch a rollout that silently did not happen
+   — readiness passing because the *previous* version was still serving — but it
+   emits `::warning::` rather than exiting non-zero. With the commit permanently
+   `unknown`, that warning has fired on every deploy and gated nothing.
+
+The fix is to pass the commit through at build time and then make the step fail
+rather than warn. Until both halves are done, treat that step as informational:
+it is a check in the shape of a gate.

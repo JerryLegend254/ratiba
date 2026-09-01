@@ -76,24 +76,34 @@ Status: ✅ done and verified · ⚠️ configured but not executed · ❌ not d
 | Deployed to a cloud provider | ✅ | Railway, three isolated environments each with its own PostgreSQL |
 | Reachable at a public URL | ✅ | https://ratiba-api-production.up.railway.app |
 | Deployment configured | ✅ | [`railway.json`](../railway.json): Dockerfile builder, pre-deploy migration, `/readyz` health check, drain and restart policy |
-| **CI runs the test suite on every pull request** | ✅ | [`ci.yml`](../.github/workflows/ci.yml) — `on: pull_request`. 7 parallel jobs. Note: an invalid workflow expression meant this file failed to parse and every run died in 0s until it was fixed on 21 Aug; the jobs themselves are verified locally, and `make verify-workflows` now gates the file |
-| **Automatic deploy when a PR is merged into a designated branch** | ⚠️ | [`deploy.yml`](../.github/workflows/deploy.yml) — `on: push` to `dev`/`staging`/`main`. Merging a PR *is* a push; GitHub has no separate "merged" event |
+| **CI runs the test suite on every pull request** | ⚠️ | [`ci.yml`](../.github/workflows/ci.yml) — `on: pull_request` and `on: push` to `dev`/`staging`/`main`. 7 parallel jobs behind one aggregate `CI passed` gate. An invalid workflow expression meant the file failed to parse and every run died in 0s until it was fixed on 21 Aug; the suite has since run green on all three branches. **Every run so far was push-triggered** — the `pull_request` trigger is configured and has not been exercised, because the branches were promoted by direct merge rather than by pull request. `make verify-workflows` now gates the file |
+| **Automatic deploy when a PR is merged into a designated branch** | ✅ | [`deploy.yml`](../.github/workflows/deploy.yml) — `on: push` to `dev`/`staging`/`main`. Merging a PR *is* a push; GitHub has no separate "merged" event. Verified: a push to each of the three branches deployed the matching environment and passed its smoke suite |
 | README states the public URL | ✅ | https://ratiba-api-production.up.railway.app, in the status table |
 | README states which branch triggers a deploy, and how | ✅ | [README — Branch → environment mapping](../README.md#branch--environment-mapping) |
 | README describes what the pipeline does | ✅ | [README — CI/CD](../README.md#cicd) with a flow diagram |
 
-**Honest summary:** all three environments are live and verified. The one thing
-not yet observed end to end is a CI-*driven* deploy — the environments were
-provisioned and first-deployed from a workstation, so the next push to a
-protected branch is the first time the workflow itself does the deploying.
+**Honest summary:** all three environments are live, and the pipeline now
+deploys them. CI and Deploy have both run green on `dev`, `staging` and `main`.
 
-The first attempts at that failed, for reasons worth recording rather than
-quietly fixing: the deploy job pinned a Railway CLI predating the current
-project-token exchange, and the CI workflow contained an expression error that
-prevented it from ever running. Both are fixed and the diagnosis is in
-[docs/ai-worklog.md](ai-worklog.md). Neither fix can be validated by re-running
-the failed jobs, because a re-run replays the workflow file from the commit it
-is re-running — only a fresh push exercises it.
+Getting there took two failures worth recording rather than quietly fixing: the
+deploy job pinned a Railway CLI predating the current project-token exchange, and
+the CI workflow contained an expression error that stopped GitHub parsing the
+file at all, so every run died in 0s with no logs. Every gate in that file was
+correct and none of them had ever executed. Both are fixed, `make
+verify-workflows` now catches the second class, and the diagnosis is in
+[docs/ai-worklog.md](ai-worklog.md).
+
+Two things are still unproven, and neither is fixed by asserting otherwise:
+
+- **The `pull_request` trigger has never fired.** Branches were promoted by
+  direct merge, so CI has only ever run on `push`. The jobs are identical either
+  way, but "runs on every pull request" is configuration here, not observation.
+- **The deployed-commit check does not gate.** `deploy.yml` compares the commit
+  the service reports against the one being deployed, but on a mismatch it emits
+  a warning instead of failing. Since Railway does not pass the `COMMIT`
+  build-arg through, the service reports `unknown` and that step has warned on
+  every deploy. It is a check that looks like a gate and is not one — the same
+  shape of defect as the two above.
 
 ---
 
@@ -112,7 +122,7 @@ is re-running — only a fresh push exercises it.
 
 | Item | Status |
 |---|---|
-| Link to a public GitHub/GitLab repository | ⚠️ Push required before submission |
+| Link to a public GitHub/GitLab repository | ✅ https://github.com/JerryLegend254/ratiba — public, confirmed with an unauthenticated request |
 | Link to the deployed, running application | ✅ https://ratiba-api-production.up.railway.app |
 | README covering design decisions | ✅ |
 | README covering how to run locally | ✅ Verified from a clean checkout — [onboarding rehearsal](onboarding-rehearsal.md) |
