@@ -37,6 +37,13 @@ permissions:
   # Environments view.
   deployments: write
 
+env:
+  # Pipe, not comma -- see the note in ci.yml. The default
+  # "https://proxy.golang.org,direct" falls through to `direct` only on 404 or
+  # 410, so a transient proxy error fails the run outright. This job re-runs the
+  # test suite before deploying, so it has exactly the same exposure.
+  GOPROXY: "https://proxy.golang.org|direct"
+
 # Serialise deployments per environment. Without this, two quick merges could
 # have an older commit's deploy finish last and overwrite the newer one.
 # cancel-in-progress is deliberately false: aborting a deploy mid-rollout is
