@@ -29,6 +29,21 @@ env:
   # Any deviation from go.mod is caught by the verify-go-version job.
   POSTGRES_VERSION: "17.5"
 
+  # Pipe, not comma. The separator is the whole point: with the default
+  # "https://proxy.golang.org,direct", a comma means the go command falls
+  # through to the next entry ONLY on 404 or 410. A transient network failure
+  # from the proxy is fatal, with no attempt at "direct" at all -- which is how
+  # a single dropped HTTP/2 stream took out the whole static-analysis job:
+  #
+  #   read "https://proxy.golang.org/.../@v/v2.4.0.zip": stream error;
+  #   INTERNAL_ERROR; received from peer
+  #
+  # A pipe falls through on ANY error, so the same blip retries against the
+  # origin repository instead of failing the run. This does not weaken supply
+  # chain integrity: go.sum and GOSUMDB verify the module either way, so a
+  # tampered direct fetch still fails verification.
+  GOPROXY: "https://proxy.golang.org|direct"
+
 jobs:
   # ---------------------------------------------------------------------------
   # Fast feedback: anything that does not need a database.
