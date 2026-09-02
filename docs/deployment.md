@@ -262,20 +262,32 @@ merge and *gated* on approval; nobody has to initiate it by hand.
 
 ### 6. Branch protection
 
-Settings → Branches, for `main`, `staging` and `dev`:
+**Applied**, as two rulesets (Settings → Rules → Rulesets), and verified with
+`gh api repos/<owner>/<repo>/rules/branches/<branch>`:
 
-- Require a pull request before merging
-- Require the **`CI passed`** status check
-- Require conversation resolution
-- Block force pushes and deletion
-- Require one approving review where the plan allows it
+| Ruleset | Applies to | Rules |
+|---|---|---|
+| `security_rules` | all branches | block deletion, block force pushes, required deployments |
+| `promotion path` | `main`, `staging` | require a pull request, require the `CI passed` status check, require conversation resolution |
 
 `CI passed` is a single aggregate job that fails if **any** required job did not
 succeed — including skipped or cancelled ones, which a plain `needs` would let
-through.
+through. Requiring that one check requires all seven.
 
-> These settings could not be applied or verified from this machine. They are
-> recommendations, not claims.
+Two choices that are deliberate rather than oversights:
+
+- **`dev` is not behind a pull request.** It is the integration branch and is
+  pushed to directly; the promotion path out of it is what needs gating.
+- **Zero required approving reviews.** GitHub does not permit approving your own
+  pull request, so on a single-maintainer repository requiring one review does
+  not raise the bar — it makes merging impossible. `CI passed` is the gate doing
+  the real work.
+
+> Note that rulesets do **not** appear under the classic branch-protection API.
+> `GET /repos/{owner}/{repo}/branches/{branch}/protection` returns
+> `404 Branch not protected` even when rulesets are active and enforcing. Use
+> `GET /repos/{owner}/{repo}/rules/branches/{branch}` to see what actually
+> applies to a branch.
 
 ### 7. Deploy
 
@@ -360,8 +372,8 @@ first.
 | Full write lifecycle against development and staging | **27/27** |
 | `/metrics` returns 401 in production without a token | **Verified** |
 | GitHub Actions deploy workflow | **Verified end to end** — a push to `dev`, `staging` and `main` each deployed the matching environment, polled `/readyz` and passed its smoke suite. CI is green on all three. |
-| CI on a **pull request** | **Not yet observed** — the `pull_request` trigger is configured, but every run so far was push-triggered, because branches were promoted by direct merge. |
-| Deployed-commit verification | **Gating** — the commit is stamped into the binary at build time and the step now fails on a mismatch. Both stamping paths verified locally; the first deploy carrying this change is the end-to-end proof. See below. |
+| CI on a **pull request** | **Verified** — 6 `pull_request`-triggered runs, all green, once promotion moved to pull requests. |
+| Deployed-commit verification | **Gating, and verified live** — the commit is stamped into the binary at build time and the step fails on a mismatch. All three environments report the exact commit at the head of their branch. See below. |
 
 ### How the deployed commit gets into the binary
 
@@ -370,6 +382,10 @@ less obvious than it looks, because Railway builds from the source `railway up`
 uploads and **passes no Docker build args at all**. For a long time the service
 reported `"commit": "unknown"` for exactly that reason, and the deploy workflow's
 verification step warned about it on every single deploy while gating nothing.
+
+It works now: production, staging and development each report the short SHA at
+the head of `main`, `staging` and `dev` respectively, and the verification step
+passes on its own merits rather than because it cannot fail.
 
 The mechanism now:
 
