@@ -76,7 +76,7 @@ Status: ✅ done and verified · ⚠️ configured but not executed · ❌ not d
 | Deployed to a cloud provider | ✅ | Railway, three isolated environments each with its own PostgreSQL |
 | Reachable at a public URL | ✅ | https://ratiba-api-production.up.railway.app |
 | Deployment configured | ✅ | [`railway.json`](../railway.json): Dockerfile builder, pre-deploy migration, `/readyz` health check, drain and restart policy |
-| **CI runs the test suite on every pull request** | ⚠️ | [`ci.yml`](../.github/workflows/ci.yml) — `on: pull_request` and `on: push` to `dev`/`staging`/`main`. 7 parallel jobs behind one aggregate `CI passed` gate. An invalid workflow expression meant the file failed to parse and every run died in 0s until it was fixed on 21 Aug; the suite has since run green on all three branches. **Every run so far was push-triggered** — the `pull_request` trigger is configured and has not been exercised, because the branches were promoted by direct merge rather than by pull request. `make verify-workflows` now gates the file |
+| **CI runs the test suite on every pull request** | ✅ | [`ci.yml`](../.github/workflows/ci.yml) — `on: pull_request` and `on: push` to `dev`/`staging`/`main`. 7 parallel jobs behind one aggregate `CI passed` gate. Verified on real pull requests: 6 `pull_request`-triggered runs, all green. An invalid workflow expression meant the file failed to parse and every run died in 0s until it was fixed on 21 Aug; `make verify-workflows` now gates the file |
 | **Automatic deploy when a PR is merged into a designated branch** | ✅ | [`deploy.yml`](../.github/workflows/deploy.yml) — `on: push` to `dev`/`staging`/`main`. Merging a PR *is* a push; GitHub has no separate "merged" event. Verified: a push to each of the three branches deployed the matching environment and passed its smoke suite |
 | README states the public URL | ✅ | https://ratiba-api-production.up.railway.app, in the status table |
 | README states which branch triggers a deploy, and how | ✅ | [README — Branch → environment mapping](../README.md#branch--environment-mapping) |
@@ -93,17 +93,24 @@ correct and none of them had ever executed. Both are fixed, `make
 verify-workflows` now catches the second class, and the diagnosis is in
 [docs/ai-worklog.md](ai-worklog.md).
 
-Two things are still unproven, and neither is fixed by asserting otherwise:
+Two further gaps were recorded here while they were open, and both are now
+closed — the entries are kept because the sequence is the point:
 
-- **The `pull_request` trigger has never fired.** Branches were promoted by
-  direct merge, so CI has only ever run on `push`. The jobs are identical either
-  way, but "runs on every pull request" is configuration here, not observation.
-- **The deployed-commit check does not gate.** `deploy.yml` compares the commit
-  the service reports against the one being deployed, but on a mismatch it emits
-  a warning instead of failing. Since Railway does not pass the `COMMIT`
-  build-arg through, the service reports `unknown` and that step has warned on
-  every deploy. It is a check that looks like a gate and is not one — the same
-  shape of defect as the two above.
+- **The `pull_request` trigger had never fired.** Branches were originally
+  promoted by direct merge, so "runs on every pull request" was configuration
+  rather than observation. Promotion now goes through pull requests, and CI has
+  run green on 6 `pull_request` events.
+- **The deployed-commit check did not gate.** It compared the reported commit
+  against the deployed one but emitted a warning instead of failing, and since
+  no build arg reached the image the service always reported `unknown` — so the
+  warning fired on every deploy and caught nothing. The commit is now stamped
+  into the binary at build time and the step exits non-zero on a mismatch.
+  Verified live: production, staging and development each report the exact
+  commit at the head of their branch.
+
+Every gate named in this document has now been observed doing its job, failing
+included. That was not true when the section above was first written, and saying
+so then is what made it worth fixing.
 
 ---
 

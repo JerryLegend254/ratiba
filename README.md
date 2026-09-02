@@ -687,14 +687,34 @@ and are tested, but they are for local development and CI.
 
 Full procedure: [docs/deployment.md](docs/deployment.md#rollback).
 
-### Recommended branch protection
+### Branch protection
 
-Not applied — this repository's settings could not be verified from here. For
-`main`, `staging` and `dev`: require pull requests, require the `CI passed`
-status check, require conversation resolution, forbid force pushes and deletion,
-and require at least one reviewer where the account plan allows. A required
-reviewer on production still satisfies "deploys automatically on merge" — the
-deploy is triggered by the merge and gated on approval, not initiated by hand.
+Applied, as two GitHub rulesets, and verified through the API:
+
+| | `main` | `staging` | `dev` |
+|---|---|---|---|
+| Block deletion | ✅ | ✅ | ✅ |
+| Block force pushes | ✅ | ✅ | ✅ |
+| Required deployments | ✅ | ✅ | ✅ |
+| Require a pull request | ✅ | ✅ | — |
+| Require the **`CI passed`** check | ✅ | ✅ | — |
+| Require conversation resolution | ✅ | ✅ | — |
+
+`CI passed` is a single aggregate job that fails if **any** required job did not
+succeed, including skipped or cancelled ones, which a plain `needs` would let
+through. Requiring that one check therefore requires all seven.
+
+Two deliberate choices worth naming:
+
+- **`dev` stays directly pushable.** It is the integration branch, and the
+  promotion path out of it is what needs gating. Requiring a pull request into
+  the branch you develop on buys nothing here and costs a branch per commit.
+  `main` and `staging` are only ever reached by pull request, which is already
+  how they were being used.
+- **Zero required approving reviews.** GitHub does not let anyone approve their
+  own pull request, so on a single-maintainer repository requiring one review
+  does not raise the bar, it removes the ability to merge at all. The gate that
+  does real work here is `CI passed`.
 
 ---
 
