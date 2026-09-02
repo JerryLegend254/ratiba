@@ -26,6 +26,22 @@ COPY . .
 
 # Build metadata is injected at link time rather than baked into source, so the
 # running service can report exactly which commit it is.
+#
+# COMMIT is read from .commit when the build context carries one, and from the
+# build arg otherwise. Railway builds from source uploaded by `railway up` and
+# passes no build args at all, so a file in the context is the only way to get
+# an identity in.
+#
+# Two things about that file that are easy to get wrong:
+#
+#   * It must NOT be listed in .gitignore. `railway up` honours .gitignore by
+#     default, so ignoring it would quietly drop it from the upload and the
+#     service would go back to reporting "unknown" with nothing to show why.
+#   * The identity has to be bound to the BINARY, not supplied as a service
+#     variable at runtime. A runtime variable can be changed without rebuilding,
+#     so a rollout that silently failed would keep serving the old image while
+#     happily reporting the new commit -- which is precisely the case the deploy
+#     workflow's verification step exists to catch.
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_TIME=unknown
@@ -36,14 +52,17 @@ ARG BUILD_TIME=unknown
 # reproducible and avoids leaking the builder's directory layout in stack traces.
 ENV CGO_ENABLED=0 GOOS=linux
 
-RUN go build \
+RUN set -eu; \
+    commit="$COMMIT"; \
+    if [ -s .commit ]; then commit="$(tr -d '[:space:]' < .commit)"; fi; \
+    go build \
       -trimpath \
       -ldflags="-s -w \
         -X main.version=${VERSION} \
-        -X main.commit=${COMMIT} \
+        -X main.commit=${commit} \
         -X main.buildTime=${BUILD_TIME}" \
-      -o /out/ratiba-api ./cmd/api \
- && go build \
+      -o /out/ratiba-api ./cmd/api; \
+    go build \
       -trimpath \
       -ldflags="-s -w" \
       -o /out/ratiba-migrate ./cmd/migrate

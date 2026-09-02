@@ -361,25 +361,42 @@ first.
 | `/metrics` returns 401 in production without a token | **Verified** |
 | GitHub Actions deploy workflow | **Verified end to end** — a push to `dev`, `staging` and `main` each deployed the matching environment, polled `/readyz` and passed its smoke suite. CI is green on all three. |
 | CI on a **pull request** | **Not yet observed** — the `pull_request` trigger is configured, but every run so far was push-triggered, because branches were promoted by direct merge. |
-| Deployed-commit verification | **Configured, not gating** — the step compares the reported commit against the deployed one but emits a warning rather than failing. Railway does not pass the `COMMIT` build-arg through, so the service reports `unknown` and this step warns on every deploy. See below. |
+| Deployed-commit verification | **Gating** — the commit is stamped into the binary at build time and the step now fails on a mismatch. Both stamping paths verified locally; the first deploy carrying this change is the end-to-end proof. See below. |
 
-### The deployed version does not identify itself
+### How the deployed commit gets into the binary
 
-`GET /` reports `"commit": "unknown"` and `"version": "dev"` in all three
-environments. The Dockerfile declares `ARG COMMIT=unknown` and `ARG VERSION=dev`
-and injects them with `-X main.commit=...` / `-X main.version=...`, but Railway
-builds from source without passing either build-arg, so both keep their defaults.
+`GET /` reports the commit the running binary was built from. Getting it there is
+less obvious than it looks, because Railway builds from the source `railway up`
+uploads and **passes no Docker build args at all**. For a long time the service
+reported `"commit": "unknown"` for exactly that reason, and the deploy workflow's
+verification step warned about it on every single deploy while gating nothing.
 
-Two consequences, in increasing order of importance:
+The mechanism now:
 
-1. You cannot tell from the running service which commit it is serving, which is
-   exactly the question worth answering during an incident.
-2. **The deploy workflow's "Verify the deployed commit matches this one" step
-   never fails.** It was written to catch a rollout that silently did not happen
-   — readiness passing because the *previous* version was still serving — but it
-   emits `::warning::` rather than exiting non-zero. With the commit permanently
-   `unknown`, that warning has fired on every deploy and gated nothing.
+1. The deploy workflow writes the short SHA to `.commit` in the working directory
+   before `railway up`.
+2. `railway up` uploads it as part of the build context.
+3. The Dockerfile reads `.commit` if it exists, and falls back to the `COMMIT`
+   build arg otherwise, so `make docker-build` still stamps correctly from a
+   local checkout.
+4. The value is linked in with `-X main.commit=...`.
 
-The fix is to pass the commit through at build time and then make the step fail
-rather than warn. Until both halves are done, treat that step as informational:
-it is a check in the shape of a gate.
+Two traps worth knowing, because both fail silently:
+
+- **`.commit` must not be listed in `.gitignore`.** `railway up` honours
+  `.gitignore` by default (there is a `--no-gitignore` flag to disable it), so
+  ignoring the file would drop it from the upload and the service would go back
+  to reporting `unknown` with nothing to indicate why.
+- **The identity has to be bound to the binary, not supplied at runtime.** A
+  Railway service variable would have been easier, and wrong: a service variable
+  can change without a rebuild, so a rollout that silently failed would keep
+  serving the old image while reporting the new commit. That is precisely the
+  case the verification step exists to catch, so sourcing the value that way
+  would make the check pass exactly when it should fail.
+
+`version` is still `dev` in every environment. The same mechanism would fix it;
+it is not wired up because a version string carries no information here that the
+commit does not.
+
+The verification step now exits non-zero on a mismatch rather than warning. A
+check that cannot fail is not a check.

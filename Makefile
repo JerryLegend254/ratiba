@@ -8,6 +8,12 @@ SHELL := bash
 # `verify-go-version` checks that they do.
 GO_VERSION := $(shell awk '/^go /{print $$2}' go.mod)
 
+# Build stamp. A local build reports the same kind of identity a deployed one
+# does, so `make run` and the container agree about what "commit" means. Falls
+# back to "unknown" outside a git checkout, which is exactly what the binary
+# defaults to anyway.
+COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+
 # Pinned tool versions. CI installs exactly these, so "works on my machine"
 # cannot be a lint-version difference.
 SQLC_VERSION        := v1.31.1
@@ -217,7 +223,7 @@ smoke-write: ## Run the full book/reschedule/cancel lifecycle against a running 
 
 .PHONY: docker-build
 docker-build: ## Build the production image
-	docker build -t ratiba:latest .
+	docker build --build-arg COMMIT=$(COMMIT) -t ratiba:latest .
 
 .PHONY: verify-compose
 verify-compose: ## Validate the compose file and the observability profile
@@ -228,7 +234,7 @@ verify-compose: ## Validate the compose file and the observability profile
 .PHONY: build
 build: ## Compile both binaries into ./bin
 	@mkdir -p bin
-	go build -trimpath -o bin/ratiba-api ./cmd/api
+	go build -trimpath -ldflags="-X main.commit=$(COMMIT)" -o bin/ratiba-api ./cmd/api
 	go build -trimpath -o bin/ratiba-migrate ./cmd/migrate
 	@echo "==> Built bin/ratiba-api and bin/ratiba-migrate"
 
