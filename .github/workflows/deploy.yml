@@ -180,6 +180,21 @@ jobs:
         # same token against both versions.
         run: npm install -g @railway/cli@4.33.0
 
+      - name: Stamp the commit into the build context
+        # Railway builds from the source `railway up` uploads and passes no
+        # Docker build args, so this file is how the commit reaches the linker.
+        # The Dockerfile reads it; see the note there for why it is bound to the
+        # binary rather than set as a runtime service variable.
+        #
+        # Deliberately not added to .gitignore: `railway up` honours .gitignore
+        # by default, so ignoring this file would silently exclude it from the
+        # upload and the service would report "unknown" again.
+        #
+        # Short form, because that is what the verification step below compares.
+        run: |
+          echo "${GITHUB_SHA}" | cut -c1-7 > .commit
+          echo "Stamped $(cat .commit)"
+
       - name: Deploy
         env:
           # A project-scoped token is already bound to one Railway environment,
@@ -198,6 +213,11 @@ jobs:
       - name: Verify the deployed commit matches this one
         # Catches the case where the wait succeeded because the PREVIOUS
         # version was still serving and the new one never rolled out.
+        #
+        # This fails the job. It used to warn, which meant it caught nothing:
+        # the commit was never stamped, so the service always reported
+        # "unknown", and the warning fired on every deploy while the run stayed
+        # green. A check that cannot fail is not a check.
         run: |
           deployed=$(curl -sS --max-time 15 "${{ vars.PUBLIC_URL }}/" \
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["commit"])')
@@ -205,8 +225,10 @@ jobs:
           echo "Deployed commit: $deployed"
           echo "Expected commit: $expected"
           if [ "$deployed" != "$expected" ]; then
-            echo "::warning::The service reports commit '$deployed' but '$expected' was deployed."
-            echo "::warning::This can be a slow rollout; check the Railway deployment log."
+            echo "::error::The service reports commit '$deployed' but '$expected' was deployed."
+            echo "::error::Either the rollout did not complete, or the previous version is still serving."
+            echo "::error::Check the Railway deployment log before re-running."
+            exit 1
           fi
 
       - name: Smoke test
